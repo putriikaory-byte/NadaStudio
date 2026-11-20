@@ -35,6 +35,8 @@ private fun ScrollRow(content: @Composable RowScope.() -> Unit) = Row(
     content = content
 )
 
+private fun noteLabel(n: Int): String = NOTE_NAMES[n % 12] + (n / 12 - 1)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NadaApp(synth: SynthEngine) {
@@ -55,12 +57,25 @@ fun NadaApp(synth: SynthEngine) {
             var lock by remember { mutableStateOf(false) }
             var octave by remember { mutableIntStateOf(3) }
             var volume by remember { mutableFloatStateOf(0.8f) }
+            var tab by remember { mutableIntStateOf(0) }
+            var seqNote by remember { mutableIntStateOf(synth.seqNote) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
+            val grid = remember {
+                mutableStateListOf<Boolean>().also { l ->
+                    repeat(CHANNEL_NAMES.size * STEPS) { l.add(synth.steps[it]) }
+                }
+            }
+            val mutes = remember {
+                mutableStateListOf<Boolean>().also { l ->
+                    repeat(CHANNEL_NAMES.size) { l.add(synth.chMute[it]) }
+                }
+            }
 
             SideEffect {
                 synth.bpm = bpm; synth.metronomeOn = metro
                 synth.wave = wave; synth.volume = volume
+                synth.seqNote = seqNote
             }
 
             fun tap() {
@@ -77,6 +92,8 @@ fun NadaApp(synth: SynthEngine) {
             Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 ScrollRow {
                     Text("Nada Studio", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Button(onClick = { synth.startSeq() }) { Text("▶ Play") }
+                    OutlinedButton(onClick = { synth.stopSeq() }) { Text("■ Stop") }
                     OutlinedButton(onClick = { bpm = (bpm - 1).coerceAtLeast(40) }) { Text("−") }
                     Text("$bpm BPM", fontWeight = FontWeight.Bold)
                     OutlinedButton(onClick = { bpm = (bpm + 1).coerceAtMost(240) }) { Text("+") }
@@ -85,39 +102,53 @@ fun NadaApp(synth: SynthEngine) {
                     Text("Metronom")
                 }
                 ScrollRow {
+                    FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text("Channel Rack") })
+                    FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Keyboard") })
                     Text("Suara")
                     Wave.values().forEach {
                         FilterChip(selected = wave == it, onClick = { wave = it }, label = { Text(it.label) })
                     }
-                    Text("Oktaf")
-                    OutlinedButton(onClick = { octave = (octave - 1).coerceAtLeast(1) }) { Text("−") }
-                    Text("C$octave")
-                    OutlinedButton(onClick = { octave = (octave + 1).coerceAtMost(5) }) { Text("+") }
-                    Text("Volume")
-                    Slider(value = volume, onValueChange = { volume = it }, modifier = Modifier.width(120.dp))
                 }
-                ScrollRow {
-                    Text("Kunci")
-                    NOTE_NAMES.forEachIndexed { i, name ->
-                        FilterChip(selected = root == i, onClick = { root = i }, label = { Text(name) })
+                if (tab == 0) {
+                    ScrollRow {
+                        Text("Nada channel Synth")
+                        OutlinedButton(onClick = { seqNote = (seqNote - 1).coerceAtLeast(24) }) { Text("−") }
+                        Text(noteLabel(seqNote), fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = { seqNote = (seqNote + 1).coerceAtMost(96) }) { Text("+") }
                     }
-                    Text("Tangga nada")
-                    ScaleType.values().forEach {
-                        FilterChip(selected = scaleType == it, onClick = { scaleType = it }, label = { Text(it.label) })
+                    ChannelRack(synth, grid, mutes, Modifier.fillMaxWidth().weight(1f))
+                } else {
+                    ScrollRow {
+                        Text("Oktaf")
+                        OutlinedButton(onClick = { octave = (octave - 1).coerceAtLeast(1) }) { Text("−") }
+                        Text("C$octave")
+                        OutlinedButton(onClick = { octave = (octave + 1).coerceAtMost(5) }) { Text("+") }
+                        Text("Volume")
+                        Slider(value = volume, onValueChange = { volume = it }, modifier = Modifier.width(120.dp))
                     }
-                    Switch(checked = lock, onCheckedChange = { lock = it })
-                    Text("Kunci nada")
+                    ScrollRow {
+                        Text("Kunci")
+                        NOTE_NAMES.forEachIndexed { i, name ->
+                            FilterChip(selected = root == i, onClick = { root = i }, label = { Text(name) })
+                        }
+                        Text("Tangga nada")
+                        ScaleType.values().forEach {
+                            FilterChip(selected = scaleType == it, onClick = { scaleType = it }, label = { Text(it.label) })
+                        }
+                        Switch(checked = lock, onCheckedChange = { lock = it })
+                        Text("Kunci nada")
+                    }
+                    PianoKeyboard(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        startNote = 12 * (octave + 1),
+                        octaves = 3,
+                        scale = scale,
+                        root = root,
+                        lock = lock,
+                        onNoteOn = { synth.noteOn(it) },
+                        onNoteOff = { synth.noteOff(it) }
+                    )
                 }
-                PianoKeyboard(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    startNote = 12 * (octave + 1),
-                    octaves = 3,
-                    scale = scale,
-                    root = root,
-                    lock = lock,
-                    onNoteOn = { synth.noteOn(it) },
-                    onNoteOff = { synth.noteOff(it) }
-                )
             }
         }
     }
