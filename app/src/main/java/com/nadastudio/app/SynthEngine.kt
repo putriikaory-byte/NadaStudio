@@ -19,8 +19,10 @@ enum class Wave(val label: String) {
 val CHANNEL_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth")
 const val STEPS = 16
 const val SYNTH_CH = 5
+const val ROLL_ROWS = 60
+const val ROLL_LOW = 36
 
-/** Synth polifonik + drum + step sequencer. */
+/** Synth polifonik + drum + step sequencer + piano roll. */
 class SynthEngine {
     private val sampleRate = 44100
 
@@ -43,6 +45,9 @@ class SynthEngine {
 
     val steps = BooleanArray(CHANNEL_NAMES.size * STEPS)
     val chMute = BooleanArray(CHANNEL_NAMES.size)
+    val rollLen = IntArray(ROLL_ROWS * STEPS)
+    private val rollLeft = IntArray(ROLL_ROWS)
+    private val rollNote = IntArray(ROLL_ROWS)
 
     @Volatile var wave = Wave.SINE
     @Volatile var volume = 0.8f
@@ -56,6 +61,7 @@ class SynthEngine {
     @Volatile private var pos = 0L
     @Volatile private var gateNote = -1
     @Volatile private var offAt = 0L
+    @Volatile private var rollActive = false
     private var seed = 12345
     private var track: AudioTrack? = null
     private var thread: Thread? = null
@@ -105,6 +111,8 @@ class SynthEngine {
         track = null
         voices.clear()
         hits.clear()
+        for (r in 0 until ROLL_ROWS) rollLeft[r] = 0
+        rollActive = false
     }
 
     fun startSeq() { resetReq = true; playing = true }
@@ -119,16 +127,17 @@ class SynthEngine {
         voices.filter { it.note == note && !it.releasing }.forEach { it.releasing = true }
     }
 
+    /** Bunyikan satu nada singkat (untuk coba-coba). */
+    fun previewNote(n: Int) {
+        if (gateNote >= 0) noteOff(gateNote)
+        noteOn(n)
+        gateNote = n
+        offAt = pos + sampleRate / 4
+    }
+
     /** Coba suara satu channel. */
     fun preview(ch: Int) {
-        if (ch == SYNTH_CH) {
-            if (gateNote >= 0) noteOff(gateNote)
-            noteOn(seqNote)
-            gateNote = seqNote
-            offAt = pos + sampleRate / 4
-        } else {
-            hits.add(Hit(ch))
-        }
+        if (ch == SYNTH_CH) previewNote(seqNote) else hits.add(Hit(ch))
     }
 
     private fun nextNoise(): Double {
@@ -152,6 +161,12 @@ class SynthEngine {
             val stepLen = perBeat / 4
             for (i in 0 until frames) {
                 if (resetReq) { resetReq = false; seqCounter = 0; step = 0 }
+                if (!playing && rollActive) {
+                    for (r in 0 until ROLL_ROWS) {
+                        if (rollLeft[r] > 0) { noteOff(rollNote[r]); rollLeft[r] = 0 }
+                    }
+                    rollActive = false
+                }
                 var stepTrig = false
                 if (playing) {
                     if (seqCounter == 0L) {
@@ -167,6 +182,22 @@ class SynthEngine {
                                 } else {
                                     hits.add(Hit(ch))
                                 }
+                            }
+                        }
+                        for (r in 0 until ROLL_ROWS) {
+                            if (rollLeft[r] > 0) {
+                                rollLeft[r]--
+                                if (rollLeft[r] == 0) noteOff(rollNote[r])
+                            }
+                        }
+                        for (r in 0 until ROLL_ROWS) {
+                            val l = rollLen[r * STEPS + step]
+                            if (l > 0) {
+                                if (rollLeft[r] > 0) noteOff(rollNote[r])
+                                rollNote[r] = ROLL_LOW + r
+                                noteOn(rollNote[r])
+                                rollLeft[r] = l
+                                rollActive = true
                             }
                         }
                     }
