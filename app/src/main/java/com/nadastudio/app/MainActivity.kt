@@ -59,6 +59,8 @@ fun NadaApp(synth: SynthEngine) {
             var volume by remember { mutableFloatStateOf(0.8f) }
             var tab by remember { mutableIntStateOf(0) }
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
+            var rollOct by remember { mutableIntStateOf(2) }
+            var lenSel by remember { mutableIntStateOf(1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
             val grid = remember {
@@ -69,6 +71,11 @@ fun NadaApp(synth: SynthEngine) {
             val mutes = remember {
                 mutableStateListOf<Boolean>().also { l ->
                     repeat(CHANNEL_NAMES.size) { l.add(synth.chMute[it]) }
+                }
+            }
+            val roll = remember {
+                mutableStateListOf<Int>().also { l ->
+                    repeat(ROLL_ROWS * STEPS) { l.add(synth.rollLen[it]) }
                 }
             }
 
@@ -103,51 +110,83 @@ fun NadaApp(synth: SynthEngine) {
                 }
                 ScrollRow {
                     FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text("Channel Rack") })
-                    FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Keyboard") })
+                    FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Piano Roll") })
+                    FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text("Keyboard") })
                     Text("Suara")
                     Wave.values().forEach {
                         FilterChip(selected = wave == it, onClick = { wave = it }, label = { Text(it.label) })
                     }
                 }
-                if (tab == 0) {
-                    ScrollRow {
-                        Text("Nada channel Synth")
-                        OutlinedButton(onClick = { seqNote = (seqNote - 1).coerceAtLeast(24) }) { Text("−") }
-                        Text(noteLabel(seqNote), fontWeight = FontWeight.Bold)
-                        OutlinedButton(onClick = { seqNote = (seqNote + 1).coerceAtMost(96) }) { Text("+") }
-                    }
-                    ChannelRack(synth, grid, mutes, Modifier.fillMaxWidth().weight(1f))
-                } else {
-                    ScrollRow {
-                        Text("Oktaf")
-                        OutlinedButton(onClick = { octave = (octave - 1).coerceAtLeast(1) }) { Text("−") }
-                        Text("C$octave")
-                        OutlinedButton(onClick = { octave = (octave + 1).coerceAtMost(5) }) { Text("+") }
-                        Text("Volume")
-                        Slider(value = volume, onValueChange = { volume = it }, modifier = Modifier.width(120.dp))
-                    }
-                    ScrollRow {
-                        Text("Kunci")
-                        NOTE_NAMES.forEachIndexed { i, name ->
-                            FilterChip(selected = root == i, onClick = { root = i }, label = { Text(name) })
+                when (tab) {
+                    0 -> {
+                        ScrollRow {
+                            Text("Nada channel Synth")
+                            OutlinedButton(onClick = { seqNote = (seqNote - 1).coerceAtLeast(24) }) { Text("−") }
+                            Text(noteLabel(seqNote), fontWeight = FontWeight.Bold)
+                            OutlinedButton(onClick = { seqNote = (seqNote + 1).coerceAtMost(96) }) { Text("+") }
                         }
-                        Text("Tangga nada")
-                        ScaleType.values().forEach {
-                            FilterChip(selected = scaleType == it, onClick = { scaleType = it }, label = { Text(it.label) })
-                        }
-                        Switch(checked = lock, onCheckedChange = { lock = it })
-                        Text("Kunci nada")
+                        ChannelRack(synth, grid, mutes, Modifier.fillMaxWidth().weight(1f))
                     }
-                    PianoKeyboard(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        startNote = 12 * (octave + 1),
-                        octaves = 3,
-                        scale = scale,
-                        root = root,
-                        lock = lock,
-                        onNoteOn = { synth.noteOn(it) },
-                        onNoteOff = { synth.noteOff(it) }
-                    )
+                    1 -> {
+                        ScrollRow {
+                            Text("Panjang")
+                            listOf(1 to "1/16", 2 to "1/8", 4 to "1/4", 8 to "1/2").forEach { (v, label) ->
+                                FilterChip(selected = lenSel == v, onClick = { lenSel = v }, label = { Text(label) })
+                            }
+                            Text("Oktaf")
+                            OutlinedButton(onClick = { rollOct = (rollOct - 1).coerceAtLeast(0) }) { Text("−") }
+                            Text("C${rollOct + 2}", fontWeight = FontWeight.Bold)
+                            OutlinedButton(onClick = { rollOct = (rollOct + 1).coerceAtMost(4) }) { Text("+") }
+                            OutlinedButton(onClick = {
+                                for (i in roll.indices) { roll[i] = 0; synth.rollLen[i] = 0 }
+                            }) { Text("Hapus") }
+                            Text(
+                                "Kunci: ${NOTE_NAMES[root]} ${scaleType.label}" + if (lock) " (terkunci)" else ""
+                            )
+                        }
+                        PianoRoll(
+                            synth = synth,
+                            roll = roll,
+                            octIndex = rollOct,
+                            lenSel = lenSel,
+                            scale = scale,
+                            root = root,
+                            lock = lock,
+                            modifier = Modifier.fillMaxWidth().weight(1f)
+                        )
+                    }
+                    else -> {
+                        ScrollRow {
+                            Text("Oktaf")
+                            OutlinedButton(onClick = { octave = (octave - 1).coerceAtLeast(1) }) { Text("−") }
+                            Text("C$octave")
+                            OutlinedButton(onClick = { octave = (octave + 1).coerceAtMost(5) }) { Text("+") }
+                            Text("Volume")
+                            Slider(value = volume, onValueChange = { volume = it }, modifier = Modifier.width(120.dp))
+                        }
+                        ScrollRow {
+                            Text("Kunci")
+                            NOTE_NAMES.forEachIndexed { i, name ->
+                                FilterChip(selected = root == i, onClick = { root = i }, label = { Text(name) })
+                            }
+                            Text("Tangga nada")
+                            ScaleType.values().forEach {
+                                FilterChip(selected = scaleType == it, onClick = { scaleType = it }, label = { Text(it.label) })
+                            }
+                            Switch(checked = lock, onCheckedChange = { lock = it })
+                            Text("Kunci nada")
+                        }
+                        PianoKeyboard(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            startNote = 12 * (octave + 1),
+                            octaves = 3,
+                            scale = scale,
+                            root = root,
+                            lock = lock,
+                            onNoteOn = { synth.noteOn(it) },
+                            onNoteOff = { synth.noteOff(it) }
+                        )
+                    }
                 }
             }
         }
