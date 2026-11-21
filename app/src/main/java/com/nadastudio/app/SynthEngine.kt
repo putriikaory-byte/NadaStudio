@@ -13,20 +13,30 @@ import kotlin.math.tanh
 
 enum class Wave(val label: String) {
     SINE("Sine"), SQUARE("Square"), SAW("Saw"), TRIANGLE("Triangle"),
-    ORGAN("Organ"), PIANO("Piano"), PLUCK("Pluck"), BELL("Bell")
+    ORGAN("Organ"), PIANO("Piano"), PLUCK("Pluck"), BELL("Bell"),
+    BASS("Bass"), GUITAR("Gitar"), STRINGS("Strings"), LEAD("Lead")
 }
 
 val CHANNEL_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth")
+val TRACK_NAMES = listOf("Melodi", "Bass", "Akor")
 const val STEPS = 16
 const val SYNTH_CH = 5
 const val ROLL_ROWS = 60
 const val ROLL_LOW = 36
+const val TRACKS = 3
+const val ROLL_SIZE = ROLL_ROWS * STEPS
 
-/** Synth polifonik + drum + step sequencer + piano roll. */
+/** Synth polifonik + drum + step sequencer + piano roll multi-track. */
 class SynthEngine {
     private val sampleRate = 44100
 
-    private class Voice(val note: Int, val freq: Double) {
+    private class Voice(
+        val note: Int,
+        val freq: Double,
+        val wave: Wave,
+        val gain: Float,
+        val owner: Int
+    ) {
         var phase = 0.0
         var mphase = 0.0
         var age = 0L
@@ -45,9 +55,12 @@ class SynthEngine {
 
     val steps = BooleanArray(CHANNEL_NAMES.size * STEPS)
     val chMute = BooleanArray(CHANNEL_NAMES.size)
-    val rollLen = IntArray(ROLL_ROWS * STEPS)
-    private val rollLeft = IntArray(ROLL_ROWS)
-    private val rollNote = IntArray(ROLL_ROWS)
+    val rollLen = IntArray(TRACKS * ROLL_SIZE)
+    val trackWave = arrayOf(Wave.PIANO, Wave.BASS, Wave.STRINGS)
+    val trackMute = BooleanArray(TRACKS)
+    val trackGain = FloatArray(TRACKS) { 0.8f }
+    private val rollLeft = IntArray(TRACKS * ROLL_ROWS)
+    private val rollNote = IntArray(TRACKS * ROLL_ROWS)
 
     @Volatile var wave = Wave.SINE
     @Volatile var volume = 0.8f
@@ -111,26 +124,27 @@ class SynthEngine {
         track = null
         voices.clear()
         hits.clear()
-        for (r in 0 until ROLL_ROWS) rollLeft[r] = 0
+        for (k in 0 until TRACKS * ROLL_ROWS) rollLeft[k] = 0
         rollActive = false
     }
 
     fun startSeq() { resetReq = true; playing = true }
     fun stopSeq() { playing = false }
 
-    fun noteOn(note: Int) {
-        if (voices.any { it.note == note && !it.releasing }) return
-        voices.add(Voice(note, 440.0 * 2.0.pow((note - 69) / 12.0)))
+    fun noteOn(note: Int, w: Wave = wave, gain: Float = 1f, owner: Int = -1) {
+        if (voices.any { it.note == note && it.owner == owner && !it.releasing }) return
+        voices.add(Voice(note, 440.0 * 2.0.pow((note - 69) / 12.0), w, gain, owner))
     }
 
-    fun noteOff(note: Int) {
-        voices.filter { it.note == note && !it.releasing }.forEach { it.releasing = true }
+    fun noteOff(note: Int, owner: Int = -1) {
+        voices.filter { it.note == note && it.owner == owner && !it.releasing }
+            .forEach { it.releasing = true }
     }
 
-    /** Bunyikan satu nada singkat (untuk coba-coba). */
-    fun previewNote(n: Int) {
+    /** Bunyikan satu nada singkat; t = nomor track (untuk memakai instrumennya). */
+    fun previewNote(n: Int, t: Int = -1) {
         if (gateNote >= 0) noteOff(gateNote)
-        noteOn(n)
+        noteOn(n, if (t >= 0) trackWave[t] else wave)
         gateNote = n
         offAt = pos + sampleRate / 4
     }
@@ -155,15 +169,14 @@ class SynthEngine {
         var seqCounter = 0L
         var step = 0
         while (running) {
-            val w = wave
             val vol = volume
             val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
             val stepLen = perBeat / 4
             for (i in 0 until frames) {
                 if (resetReq) { resetReq = false; seqCounter = 0; step = 0 }
                 if (!playing && rollActive) {
-                    for (r in 0 until ROLL_ROWS) {
-                        if (rollLeft[r] > 0) { noteOff(rollNote[r]); rollLeft[r] = 0 }
+                    for (k in 0 until TRACKS * ROLL_ROWS) {
+                        if (rollLeft[k] > 0) { noteOff(rollNote[k], k / ROLL_ROWS); rollLeft[k] = 0 }
                     }
                     rollActive = false
                 }
@@ -184,20 +197,26 @@ class SynthEngine {
                                 }
                             }
                         }
-                        for (r in 0 until ROLL_ROWS) {
-                            if (rollLeft[r] > 0) {
-                                rollLeft[r]--
-                                if (rollLeft[r] == 0) noteOff(rollNote[r])
+                        for (tr in 0 until TRACKS) {
+                            for (r in 0 until ROLL_ROWS) {
+                                val k = tr * ROLL_ROWS + r
+                                if (rollLeft[k] > 0) {
+                                    rollLeft[k]--
+                                    if (rollLeft[k] == 0) noteOff(rollNote[k], tr)
+                                }
                             }
                         }
-                        for (r in 0 until ROLL_ROWS) {
-                            val l = rollLen[r * STEPS + step]
-                            if (l > 0) {
-                                if (rollLeft[r] > 0) noteOff(rollNote[r])
-                                rollNote[r] = ROLL_LOW + r
-                                noteOn(rollNote[r])
-                                rollLeft[r] = l
-                                rollActive = true
+                        for (tr in 0 until TRACKS) {
+                            for (r in 0 until ROLL_ROWS) {
+                                val l = rollLen[tr * ROLL_SIZE + r * STEPS + step]
+                                if (l > 0 && !trackMute[tr]) {
+                                    val k = tr * ROLL_ROWS + r
+                                    if (rollLeft[k] > 0) noteOff(rollNote[k], tr)
+                                    rollNote[k] = ROLL_LOW + r
+                                    noteOn(rollNote[k], trackWave[tr], trackGain[tr], tr)
+                                    rollLeft[k] = l
+                                    rollActive = true
+                                }
                             }
                         }
                     }
@@ -212,7 +231,7 @@ class SynthEngine {
                     if (v.level <= 0.0) { voices.remove(v); continue }
                     val p = v.phase
                     var dec = 1.0
-                    val raw = when (w) {
+                    val raw = when (v.wave) {
                         Wave.SINE -> sin(2 * PI * p)
                         Wave.SQUARE -> if (p < 0.5) 1.0 else -1.0
                         Wave.SAW -> 2 * p - 1
@@ -230,11 +249,19 @@ class SynthEngine {
                             dec = exp(-v.age / (0.7 * sampleRate))
                             sin(2 * PI * p + 2.5 * dec * sin(2 * PI * v.mphase))
                         }
+                        Wave.BASS -> sin(2 * PI * p) * 0.8 + (2 * p - 1) * 0.2
+                        Wave.GUITAR -> {
+                            dec = exp(-v.age / (0.45 * sampleRate))
+                            (sin(2 * PI * p) + 0.6 * sin(4 * PI * p) + 0.4 * sin(6 * PI * p) + 0.25 * sin(8 * PI * p)) * 0.5
+                        }
+                        Wave.STRINGS -> ((2 * p - 1) + (2 * v.mphase - 1)) * 0.35
+                        Wave.LEAD -> (if (p < 0.5) 1.0 else -1.0) * 0.35 + (2 * p - 1) * 0.35
                     }
-                    s += raw * v.level * dec * 0.25
+                    s += raw * v.level * dec * 0.25 * v.gain
                     v.phase += v.freq / sampleRate
                     if (v.phase >= 1.0) v.phase -= 1.0
-                    v.mphase += v.freq * 3.5 / sampleRate
+                    val ratio = if (v.wave == Wave.BELL) 3.5 else 1.006
+                    v.mphase += v.freq * ratio / sampleRate
                     if (v.mphase >= 1.0) v.mphase -= 1.0
                     v.age++
                 }
