@@ -35,6 +35,37 @@ private fun ScrollRow(content: @Composable RowScope.() -> Unit) = Row(
     content = content
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RowScope.KeyScaleControls(
+    root: Int, onRoot: (Int) -> Unit,
+    scaleType: ScaleType, onScale: (ScaleType) -> Unit,
+    lock: Boolean, onLock: (Boolean) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    val all = ScaleType.values()
+    Text("Kunci")
+    NOTE_NAMES.forEachIndexed { i, name ->
+        FilterChip(selected = root == i, onClick = { onRoot(i) }, label = { Text(name) })
+    }
+    Text("Tangga nada")
+    OutlinedButton(onClick = { onScale(all[(scaleType.ordinal + all.size - 1) % all.size]) }) { Text("‹") }
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text(scaleType.label + " ▾") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            all.forEach {
+                DropdownMenuItem(
+                    text = { Text(it.label) },
+                    onClick = { onScale(it); open = false }
+                )
+            }
+        }
+    }
+    OutlinedButton(onClick = { onScale(all[(scaleType.ordinal + 1) % all.size]) }) { Text("›") }
+    Switch(checked = lock, onCheckedChange = onLock)
+    Text("Kunci nada")
+}
+
 private fun noteLabel(n: Int): String = NOTE_NAMES[n % 12] + (n / 12 - 1)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,8 +171,10 @@ fun NadaApp(synth: SynthEngine) {
                             OutlinedButton(onClick = {
                                 for (i in roll.indices) { roll[i] = 0; synth.rollLen[i] = 0 }
                             }) { Text("Hapus") }
-                            Text(
-                                "Kunci: ${NOTE_NAMES[root]} ${scaleType.label}" + if (lock) " (terkunci)" else ""
+                            KeyScaleControls(
+                                root, { root = it },
+                                scaleType, { scaleType = it },
+                                lock, { lock = it }
                             )
                         }
                         PianoRoll(
@@ -165,16 +198,11 @@ fun NadaApp(synth: SynthEngine) {
                             Slider(value = volume, onValueChange = { volume = it }, modifier = Modifier.width(120.dp))
                         }
                         ScrollRow {
-                            Text("Kunci")
-                            NOTE_NAMES.forEachIndexed { i, name ->
-                                FilterChip(selected = root == i, onClick = { root = i }, label = { Text(name) })
-                            }
-                            Text("Tangga nada")
-                            ScaleType.values().forEach {
-                                FilterChip(selected = scaleType == it, onClick = { scaleType = it }, label = { Text(it.label) })
-                            }
-                            Switch(checked = lock, onCheckedChange = { lock = it })
-                            Text("Kunci nada")
+                            KeyScaleControls(
+                                root, { root = it },
+                                scaleType, { scaleType = it },
+                                lock, { lock = it }
+                            )
                         }
                         PianoKeyboard(
                             modifier = Modifier.fillMaxWidth().weight(1f),
