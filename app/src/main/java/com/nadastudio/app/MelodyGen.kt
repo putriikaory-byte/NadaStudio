@@ -61,3 +61,53 @@ fun generateMelody(root: Int, type: ScaleType, octIndex: Int): List<Triple<Int, 
     }
     return out
 }
+
+private fun rowOf(pc: Int, lo: Int): Int {
+    for (r in lo until minOf(lo + 12, ROLL_ROWS)) {
+        if ((ROLL_LOW + r) % 12 == pc) return r
+    }
+    return lo
+}
+
+private fun scaleSteps(type: ScaleType): List<Int> =
+    if (type == ScaleType.CHROMATIC) ScaleType.MAJOR.steps else type.steps
+
+/** Bass otomatis: mengikuti urutan akor I - V - vi - IV dalam tangga nada. */
+fun generateBass(root: Int, type: ScaleType, octIndex: Int): List<Triple<Int, Int, Int>> {
+    val s = scaleSteps(type)
+    val lo = octIndex * 12
+    val rnd = Random(System.nanoTime())
+    val degrees = listOf(0, 4, 5, 3)
+    val patterns = listOf(
+        listOf(0 to 2, 2 to 2),
+        listOf(0 to 4),
+        listOf(0 to 1, 1 to 1, 2 to 2),
+        listOf(0 to 2, 3 to 1)
+    )
+    val out = mutableListOf<Triple<Int, Int, Int>>()
+    for (g in 0 until 4) {
+        val chordRoot = (root + s[degrees[g] % s.size]) % 12
+        val fifth = (chordRoot + 7) % 12
+        val pat = patterns[rnd.nextInt(patterns.size)]
+        pat.forEachIndexed { i, (off, len) ->
+            val pc = if (i > 0 && rnd.nextInt(100) < 30) fifth else chordRoot
+            out.add(Triple(rowOf(pc, lo), g * 4 + off, len))
+        }
+    }
+    return out
+}
+
+/** Akor otomatis: tiga nada (1-3-5) per ketukan, urutan I - V - vi - IV. */
+fun generateChords(root: Int, type: ScaleType, octIndex: Int): List<Triple<Int, Int, Int>> {
+    val s = scaleSteps(type)
+    val lo = octIndex * 12
+    val degrees = listOf(0, 4, 5, 3)
+    val out = mutableListOf<Triple<Int, Int, Int>>()
+    for (g in 0 until 4) {
+        for (k in intArrayOf(0, 2, 4)) {
+            val pc = (root + s[(degrees[g] + k) % s.size]) % 12
+            out.add(Triple(rowOf(pc, lo), g * 4, 4))
+        }
+    }
+    return out
+}
