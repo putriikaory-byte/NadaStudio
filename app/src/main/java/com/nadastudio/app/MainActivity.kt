@@ -127,6 +127,20 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
+            fun autoMelody() {
+                val lo = rollOct * 12
+                for (r in lo until minOf(lo + 12, ROLL_ROWS)) {
+                    for (st in 0 until STEPS) {
+                        roll[r * STEPS + st] = 0
+                        synth.rollLen[r * STEPS + st] = 0
+                    }
+                }
+                generateMelody(root, scaleType, rollOct).forEach { (row, step, len) ->
+                    roll[row * STEPS + step] = len
+                    synth.rollLen[row * STEPS + step] = len
+                }
+            }
+
             Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 ScrollRow {
                     Text("Nada Studio", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
@@ -168,6 +182,7 @@ fun NadaApp(synth: SynthEngine) {
                             OutlinedButton(onClick = { rollOct = (rollOct - 1).coerceAtLeast(0) }) { Text("−") }
                             Text("C${rollOct + 2}", fontWeight = FontWeight.Bold)
                             OutlinedButton(onClick = { rollOct = (rollOct + 1).coerceAtMost(4) }) { Text("+") }
+                            Button(onClick = { autoMelody() }) { Text("🎲 Auto melodi") }
                             OutlinedButton(onClick = {
                                 for (i in roll.indices) { roll[i] = 0; synth.rollLen[i] = 0 }
                             }) { Text("Hapus") }
@@ -182,6 +197,7 @@ fun NadaApp(synth: SynthEngine) {
                             roll = roll,
                             octIndex = rollOct,
                             lenSel = lenSel,
+                            scaleType = scaleType,
                             scale = scale,
                             root = root,
                             lock = lock,
