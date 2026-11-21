@@ -73,6 +73,22 @@ private fun RowScope.KeyScaleControls(
 }
 
 @Composable
+private fun WaveDropdown(current: Wave, onPick: (Wave) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text(current.label + " ▾") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            Wave.values().forEach {
+                DropdownMenuItem(
+                    text = { Text(it.label) },
+                    onClick = { onPick(it); open = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun BrowserTitle(text: String) {
     Text(
         text, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF8A3D),
@@ -128,8 +144,9 @@ fun NadaApp(synth: SynthEngine) {
             var volume by remember { mutableFloatStateOf(0.8f) }
             var tab by remember { mutableIntStateOf(0) }
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
-            var rollOct by remember { mutableIntStateOf(2) }
+            var track by remember { mutableIntStateOf(0) }
             var lenSel by remember { mutableIntStateOf(1) }
+            val rollOcts = remember { mutableStateListOf(2, 0, 1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
             val grid = remember {
@@ -142,9 +159,21 @@ fun NadaApp(synth: SynthEngine) {
                     repeat(CHANNEL_NAMES.size) { l.add(synth.chMute[it]) }
                 }
             }
-            val roll = remember {
-                mutableStateListOf<Int>().also { l ->
-                    repeat(ROLL_ROWS * STEPS) { l.add(synth.rollLen[it]) }
+            val rolls = remember {
+                List(TRACKS) { t ->
+                    mutableStateListOf<Int>().also { l ->
+                        repeat(ROLL_SIZE) { l.add(synth.rollLen[t * ROLL_SIZE + it]) }
+                    }
+                }
+            }
+            val trackWaves = remember {
+                mutableStateListOf<Wave>().also { l ->
+                    repeat(TRACKS) { l.add(synth.trackWave[it]) }
+                }
+            }
+            val trackMutes = remember {
+                mutableStateListOf<Boolean>().also { l ->
+                    repeat(TRACKS) { l.add(synth.trackMute[it]) }
                 }
             }
 
@@ -165,17 +194,24 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
-            fun autoMelody() {
-                val lo = rollOct * 12
+            fun autoTrack() {
+                val oct = rollOcts[track]
+                val lst = rolls[track]
+                val lo = oct * 12
                 for (r in lo until minOf(lo + 12, ROLL_ROWS)) {
                     for (st in 0 until STEPS) {
-                        roll[r * STEPS + st] = 0
-                        synth.rollLen[r * STEPS + st] = 0
+                        lst[r * STEPS + st] = 0
+                        synth.rollLen[track * ROLL_SIZE + r * STEPS + st] = 0
                     }
                 }
-                generateMelody(root, scaleType, rollOct).forEach { (row, step, len) ->
-                    roll[row * STEPS + step] = len
-                    synth.rollLen[row * STEPS + step] = len
+                val notes = when (track) {
+                    1 -> generateBass(root, scaleType, oct)
+                    2 -> generateChords(root, scaleType, oct)
+                    else -> generateMelody(root, scaleType, oct)
+                }
+                notes.forEach { (row, step, len) ->
+                    lst[row * STEPS + step] = len
+                    synth.rollLen[track * ROLL_SIZE + row * STEPS + step] = len
                 }
             }
 
@@ -186,7 +222,9 @@ fun NadaApp(synth: SynthEngine) {
                         bpm, wave, root, scaleType, lock, seqNote,
                         BooleanArray(grid.size) { grid[it] },
                         BooleanArray(mutes.size) { mutes[it] },
-                        IntArray(roll.size) { roll[it] }
+                        IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
+                        List(TRACKS) { trackWaves[it] },
+                        BooleanArray(TRACKS) { trackMutes[it] }
                     )
                 )
                 Toast.makeText(ctx, if (ok) "Proyek disimpan" else "Gagal menyimpan", Toast.LENGTH_SHORT).show()
@@ -206,7 +244,17 @@ fun NadaApp(synth: SynthEngine) {
                 seqNote = d.seqNote
                 for (i in grid.indices) { grid[i] = d.steps[i]; synth.steps[i] = d.steps[i] }
                 for (i in mutes.indices) { mutes[i] = d.mutes[i]; synth.chMute[i] = d.mutes[i] }
-                for (i in roll.indices) { roll[i] = d.roll[i]; synth.rollLen[i] = d.roll[i] }
+                for (t in 0 until TRACKS) {
+                    for (i in 0 until ROLL_SIZE) {
+                        val v = d.roll[t * ROLL_SIZE + i]
+                        rolls[t][i] = v
+                        synth.rollLen[t * ROLL_SIZE + i] = v
+                    }
+                    trackWaves[t] = d.trackWaves[t]
+                    synth.trackWave[t] = d.trackWaves[t]
+                    trackMutes[t] = d.trackMutes[t]
+                    synth.trackMute[t] = d.trackMutes[t]
+                }
                 if (!quiet) Toast.makeText(ctx, "Proyek dibuka", Toast.LENGTH_SHORT).show()
             }
 
@@ -243,17 +291,38 @@ fun NadaApp(synth: SynthEngine) {
 
             val rollContent: @Composable ColumnScope.() -> Unit = {
                 ScrollRow {
+                    Text("Track")
+                    TRACK_NAMES.forEachIndexed { i, n ->
+                        FilterChip(selected = track == i, onClick = { track = i }, label = { Text(n) })
+                    }
+                    Text("Instrumen")
+                    WaveDropdown(trackWaves[track]) { w ->
+                        trackWaves[track] = w
+                        synth.trackWave[track] = w
+                    }
+                    Switch(
+                        checked = !trackMutes[track],
+                        onCheckedChange = { on ->
+                            trackMutes[track] = !on
+                            synth.trackMute[track] = !on
+                        }
+                    )
+                    Text("Bunyi")
+                }
+                ScrollRow {
                     Text("Panjang")
                     listOf(1 to "1/16", 2 to "1/8", 4 to "1/4", 8 to "1/2").forEach { (v, label) ->
                         FilterChip(selected = lenSel == v, onClick = { lenSel = v }, label = { Text(label) })
                     }
                     Text("Oktaf")
-                    OutlinedButton(onClick = { rollOct = (rollOct - 1).coerceAtLeast(0) }) { Text("−") }
-                    Text("C${rollOct + 2}", fontWeight = FontWeight.Bold)
-                    OutlinedButton(onClick = { rollOct = (rollOct + 1).coerceAtMost(4) }) { Text("+") }
-                    Button(onClick = { autoMelody() }) { Text("🎲 Auto melodi") }
+                    OutlinedButton(onClick = { rollOcts[track] = (rollOcts[track] - 1).coerceAtLeast(0) }) { Text("−") }
+                    Text("C${rollOcts[track] + 2}", fontWeight = FontWeight.Bold)
+                    OutlinedButton(onClick = { rollOcts[track] = (rollOcts[track] + 1).coerceAtMost(4) }) { Text("+") }
+                    val autoLabel = when (track) { 1 -> "bass"; 2 -> "akor"; else -> "melodi" }
+                    Button(onClick = { autoTrack() }) { Text("🎲 Auto $autoLabel") }
                     OutlinedButton(onClick = {
-                        for (i in roll.indices) { roll[i] = 0; synth.rollLen[i] = 0 }
+                        val lst = rolls[track]
+                        for (i in lst.indices) { lst[i] = 0; synth.rollLen[track * ROLL_SIZE + i] = 0 }
                     }) { Text("Hapus") }
                     KeyScaleControls(
                         root, { root = it },
@@ -263,8 +332,9 @@ fun NadaApp(synth: SynthEngine) {
                 }
                 PianoRoll(
                     synth = synth,
-                    roll = roll,
-                    octIndex = rollOct,
+                    track = track,
+                    roll = rolls[track],
+                    octIndex = rollOcts[track],
                     lenSel = lenSel,
                     scaleType = scaleType,
                     scale = scale,
@@ -324,7 +394,7 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             val browserContent: @Composable ColumnScope.() -> Unit = {
-                BrowserTitle("Suara")
+                BrowserTitle("Suara keyboard")
                 Wave.values().forEach { BrowserItem(it.label, wave == it) { wave = it } }
                 BrowserTitle("Proyek")
                 BrowserItem("💾 Simpan", false) { saveProject() }
