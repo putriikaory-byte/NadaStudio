@@ -40,6 +40,7 @@ private fun LegendItem(color: Color, text: String) {
 @Composable
 fun PianoRoll(
     synth: SynthEngine,
+    track: Int,
     roll: SnapshotStateList<Int>,
     octIndex: Int,
     lenSel: Int,
@@ -58,6 +59,7 @@ fun PianoRoll(
     }
     val highlight = scale.size < 12
     val shape = RoundedCornerShape(2.dp)
+    val off = track * ROLL_SIZE
 
     fun pick(vararg intervals: Int): Int {
         for (i in intervals) {
@@ -90,7 +92,7 @@ fun PianoRoll(
         val st0 = coverStart(row0, s)
         if (st0 >= 0) {
             roll[row0 * STEPS + st0] = 0
-            synth.rollLen[row0 * STEPS + st0] = 0
+            synth.rollLen[off + row0 * STEPS + st0] = 0
             return
         }
         var row = row0
@@ -104,8 +106,8 @@ fun PianoRoll(
             if (j >= STEPS || roll[row * STEPS + j] > 0) { l = j - s; break }
         }
         roll[row * STEPS + s] = l
-        synth.rollLen[row * STEPS + s] = l
-        synth.previewNote(ROLL_LOW + row)
+        synth.rollLen[off + row * STEPS + s] = l
+        synth.previewNote(ROLL_LOW + row, track)
     }
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(1.dp)) {
@@ -141,7 +143,7 @@ fun PianoRoll(
                 Box(
                     Modifier.width(58.dp).fillMaxHeight()
                         .background(if (isBlack) Color(0xFF222222) else Color(0xFFE8E8EE))
-                        .clickable { synth.previewNote(midi) },
+                        .clickable { synth.previewNote(midi, track) },
                     contentAlignment = Alignment.CenterStart
                 ) {
                     Text(
