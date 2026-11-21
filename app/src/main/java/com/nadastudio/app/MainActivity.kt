@@ -1,6 +1,7 @@
 package com.nadastudio.app
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.horizontalScroll
@@ -11,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
@@ -80,6 +82,7 @@ fun NadaApp(synth: SynthEngine) {
         )
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            val ctx = LocalContext.current
             var bpm by remember { mutableIntStateOf(120) }
             var metro by remember { mutableStateOf(false) }
             var wave by remember { mutableStateOf(Wave.SINE) }
@@ -141,6 +144,41 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
+            fun saveProject() {
+                val ok = ProjectStore.save(
+                    ctx,
+                    ProjectData(
+                        bpm, wave, root, scaleType, lock, seqNote,
+                        BooleanArray(grid.size) { grid[it] },
+                        BooleanArray(mutes.size) { mutes[it] },
+                        IntArray(roll.size) { roll[it] }
+                    )
+                )
+                Toast.makeText(ctx, if (ok) "Proyek disimpan" else "Gagal menyimpan", Toast.LENGTH_SHORT).show()
+            }
+
+            fun loadProject(quiet: Boolean) {
+                val d = ProjectStore.load(ctx)
+                if (d == null) {
+                    if (!quiet) Toast.makeText(ctx, "Belum ada proyek tersimpan", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                bpm = d.bpm
+                wave = d.wave
+                root = d.root
+                scaleType = d.scale
+                lock = d.lock
+                seqNote = d.seqNote
+                for (i in grid.indices) { grid[i] = d.steps[i]; synth.steps[i] = d.steps[i] }
+                for (i in mutes.indices) { mutes[i] = d.mutes[i]; synth.chMute[i] = d.mutes[i] }
+                for (i in roll.indices) { roll[i] = d.roll[i]; synth.rollLen[i] = d.roll[i] }
+                if (!quiet) Toast.makeText(ctx, "Proyek dibuka", Toast.LENGTH_SHORT).show()
+            }
+
+            LaunchedEffect(Unit) {
+                if (ProjectStore.exists(ctx)) loadProject(true)
+            }
+
             Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 ScrollRow {
                     Text("Nada Studio", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
@@ -152,6 +190,8 @@ fun NadaApp(synth: SynthEngine) {
                     Button(onClick = { tap() }) { Text("TAP") }
                     Switch(checked = metro, onCheckedChange = { metro = it })
                     Text("Metronom")
+                    OutlinedButton(onClick = { saveProject() }) { Text("💾 Simpan") }
+                    OutlinedButton(onClick = { loadProject(false) }) { Text("📂 Buka") }
                 }
                 ScrollRow {
                     FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text("Channel Rack") })
