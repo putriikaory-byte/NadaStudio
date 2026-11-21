@@ -12,7 +12,9 @@ class ProjectData(
     val seqNote: Int,
     val steps: BooleanArray,
     val mutes: BooleanArray,
-    val roll: IntArray
+    val roll: IntArray,
+    val trackWaves: List<Wave>,
+    val trackMutes: BooleanArray
 )
 
 object ProjectStore {
@@ -22,7 +24,7 @@ object ProjectStore {
 
     fun save(ctx: Context, d: ProjectData): Boolean = try {
         val sb = StringBuilder()
-        sb.append("v=1\n")
+        sb.append("v=2\n")
         sb.append("bpm=").append(d.bpm).append('\n')
         sb.append("wave=").append(d.wave.name).append('\n')
         sb.append("root=").append(d.root).append('\n')
@@ -32,6 +34,8 @@ object ProjectStore {
         sb.append("steps=").append(d.steps.joinToString("") { if (it) "1" else "0" }).append('\n')
         sb.append("mutes=").append(d.mutes.joinToString("") { if (it) "1" else "0" }).append('\n')
         sb.append("roll=").append(d.roll.joinToString(",")).append('\n')
+        sb.append("twaves=").append(d.trackWaves.joinToString(",") { it.name }).append('\n')
+        sb.append("tmutes=").append(d.trackMutes.joinToString("") { if (it) "1" else "0" }).append('\n')
         file(ctx).writeText(sb.toString())
         true
     } catch (e: Exception) {
@@ -46,6 +50,7 @@ object ProjectStore {
             val m = f.readLines()
                 .filter { it.contains("=") }
                 .associate { it.substringBefore("=") to it.substringAfter("=") }
+            val defaults = listOf(Wave.PIANO, Wave.BASS, Wave.STRINGS)
             ProjectData(
                 bpm = (m["bpm"]?.toInt() ?: 120).coerceIn(40, 240),
                 wave = Wave.valueOf(m["wave"] ?: "SINE"),
@@ -55,12 +60,17 @@ object ProjectStore {
                 seqNote = (m["seqNote"]?.toInt() ?: 60).coerceIn(24, 96),
                 steps = BooleanArray(CHANNEL_NAMES.size * STEPS) { m["steps"]?.getOrNull(it) == '1' },
                 mutes = BooleanArray(CHANNEL_NAMES.size) { m["mutes"]?.getOrNull(it) == '1' },
-                roll = IntArray(ROLL_ROWS * STEPS).also { arr ->
+                roll = IntArray(TRACKS * ROLL_SIZE).also { arr ->
                     val parts = (m["roll"] ?: "").split(",")
                     for (i in arr.indices) {
                         arr[i] = parts.getOrNull(i)?.toIntOrNull()?.coerceIn(0, STEPS) ?: 0
                     }
-                }
+                },
+                trackWaves = List(TRACKS) { i ->
+                    val name = m["twaves"]?.split(",")?.getOrNull(i)
+                    Wave.values().firstOrNull { it.name == name } ?: defaults[i]
+                },
+                trackMutes = BooleanArray(TRACKS) { m["tmutes"]?.getOrNull(it) == '1' }
             )
         }
     } catch (e: Exception) {
