@@ -208,9 +208,16 @@ fun NadaApp(synth: SynthEngine) {
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
             var track by remember { mutableIntStateOf(0) }
             var lenSel by remember { mutableIntStateOf(1) }
-            var arrStyle by remember { mutableIntStateOf(0) }
+            var genreIdx by remember { mutableIntStateOf(0) }
+            var followGenreScale by remember { mutableStateOf(true) }
+            var genreInstr by remember { mutableStateOf(true) }
+            var incDrums by remember { mutableStateOf(true) }
+            var incBass by remember { mutableStateOf(true) }
+            var incChords by remember { mutableStateOf(true) }
+            var incMelody by remember { mutableStateOf(true) }
             var autoFollow by remember { mutableStateOf(false) }
             var armed by remember { mutableStateOf(false) }
+            var skipEffect by remember { mutableStateOf(false) }
             var exportBusy by remember { mutableStateOf(false) }
             var pendingLoops by remember { mutableIntStateOf(4) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
@@ -261,51 +268,68 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
-            fun autoTrack() {
-                val oct = rollOcts[track]
-                val lst = rolls[track]
-                val lo = oct * 12
-                for (r in lo until minOf(lo + 12, ROLL_ROWS)) {
-                    for (st in 0 until STEPS) {
-                        lst[r * STEPS + st] = 0
-                        synth.rollLen[track * ROLL_SIZE + r * STEPS + st] = 0
+            fun fillDrums(g: Genre) {
+                val d = generateDrumsFor(g)
+                for (i in grid.indices) { grid[i] = d[i]; synth.steps[i] = d[i] }
+                seqNote = 60 + root
+            }
+
+            fun fillTrack(t: Int, g: Genre, st: ScaleType, clearAll: Boolean) {
+                val oct = rollOcts[t]
+                val lst = rolls[t]
+                if (clearAll) {
+                    for (i in lst.indices) { lst[i] = 0; synth.rollLen[t * ROLL_SIZE + i] = 0 }
+                } else {
+                    val lo = oct * 12
+                    for (r in lo until minOf(lo + 12, ROLL_ROWS)) {
+                        for (s in 0 until STEPS) {
+                            lst[r * STEPS + s] = 0
+                            synth.rollLen[t * ROLL_SIZE + r * STEPS + s] = 0
+                        }
                     }
                 }
-                val notes = when (track) {
-                    1 -> generateBass(root, scaleType, oct)
-                    2 -> generateChords(root, scaleType, oct)
-                    else -> generateMelody(root, scaleType, oct)
+                val notes = when (t) {
+                    1 -> generateBassFor(root, st, oct, g)
+                    2 -> generateChordsFor(root, st, oct, g)
+                    else -> generateMelodyFor(root, st, oct, g)
                 }
                 notes.forEach { (row, step, len) ->
                     lst[row * STEPS + step] = len
-                    synth.rollLen[track * ROLL_SIZE + row * STEPS + step] = len
+                    synth.rollLen[t * ROLL_SIZE + row * STEPS + step] = len
                 }
             }
 
+            fun autoTrack() {
+                fillTrack(track, GENRES[genreIdx], scaleType, false)
+            }
+
             fun autoArrange(setTempo: Boolean) {
-                val d = generateDrums(arrStyle)
-                for (i in grid.indices) { grid[i] = d[i]; synth.steps[i] = d[i] }
-                seqNote = 60 + root
-                if (setTempo) bpm = DRUM_BPM[arrStyle]
+                val g = GENRES[genreIdx]
+                var st = scaleType
+                if (followGenreScale && scaleType != g.scale) {
+                    st = g.scale
+                    skipEffect = true
+                    scaleType = st
+                }
+                if (incDrums) fillDrums(g)
+                if (setTempo) bpm = g.bpm
+                if (genreInstr) {
+                    val w = listOf(g.melodyWave, g.bassWave, g.chordWave)
+                    for (t in 0 until TRACKS) {
+                        trackWaves[t] = w[t]
+                        synth.trackWave[t] = w[t]
+                    }
+                }
                 rollOcts[0] = 2
                 rollOcts[1] = 0
                 rollOcts[2] = 1
+                val inc = listOf(incMelody, incBass, incChords)
                 for (t in 0 until TRACKS) {
-                    val lst = rolls[t]
-                    for (i in lst.indices) { lst[i] = 0; synth.rollLen[t * ROLL_SIZE + i] = 0 }
-                    val notes = when (t) {
-                        1 -> generateBass(root, scaleType, rollOcts[1])
-                        2 -> generateChords(root, scaleType, rollOcts[2])
-                        else -> generateMelody(root, scaleType, rollOcts[0])
-                    }
-                    notes.forEach { (row, step, len) ->
-                        lst[row * STEPS + step] = len
-                        synth.rollLen[t * ROLL_SIZE + row * STEPS + step] = len
-                    }
+                    if (inc[t]) fillTrack(t, g, st, true)
                 }
                 Toast.makeText(
                     ctx,
-                    "Aransemen dibuat: ${NOTE_NAMES[root]} ${scaleType.label}, gaya ${DRUM_STYLES[arrStyle]}",
+                    "Lagu dibuat: ${g.name}, ${NOTE_NAMES[root]} ${st.label}, ${if (setTempo) g.bpm else bpm} BPM",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -430,7 +454,11 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             LaunchedEffect(root, scaleType) {
-                if (armed && autoFollow) autoArrange(false)
+                if (skipEffect) {
+                    skipEffect = false
+                } else if (armed && autoFollow) {
+                    autoArrange(false)
+                }
                 armed = true
             }
 
@@ -445,8 +473,9 @@ fun NadaApp(synth: SynthEngine) {
                 ChoiceDropdown("Kunci ", NOTE_NAMES, root) { root = it }
                 ChoiceDropdown("", ScaleType.values().map { it.label }, scaleType.ordinal) {
                     scaleType = ScaleType.values()[it]
+                    followGenreScale = false
                 }
-                ChoiceDropdown("Gaya ", DRUM_STYLES, arrStyle) { arrStyle = it }
+                ChoiceDropdown("Genre ", GENRES.map { it.name }, genreIdx) { genreIdx = it }
                 Button(onClick = { autoArrange(true) }) { Text("🎼 Auto aransemen") }
                 Switch(checked = autoFollow, onCheckedChange = { autoFollow = it })
                 Text("Ikuti kunci")
@@ -582,6 +611,59 @@ fun NadaApp(synth: SynthEngine) {
                 )
             }
 
+            val autoContent: @Composable ColumnScope.() -> Unit = {
+                val g = GENRES[genreIdx]
+                ScrollRow {
+                    Text("Genre")
+                    ChoiceDropdown("", GENRES.map { it.name }, genreIdx) { genreIdx = it }
+                    Text("Kunci")
+                    ChoiceDropdown("", NOTE_NAMES, root) { root = it }
+                    Text("Tangga nada")
+                    ChoiceDropdown("", ScaleType.values().map { it.label }, scaleType.ordinal) {
+                        scaleType = ScaleType.values()[it]
+                        followGenreScale = false
+                    }
+                    Switch(checked = followGenreScale, onCheckedChange = { followGenreScale = it })
+                    Text("Ikut genre")
+                }
+                ScrollRow {
+                    Text("Elemen")
+                    Switch(checked = incDrums, onCheckedChange = { incDrums = it })
+                    Text("Drum")
+                    Switch(checked = incBass, onCheckedChange = { incBass = it })
+                    Text("Bass")
+                    Switch(checked = incChords, onCheckedChange = { incChords = it })
+                    Text("Akor")
+                    Switch(checked = incMelody, onCheckedChange = { incMelody = it })
+                    Text("Melodi")
+                    Switch(checked = genreInstr, onCheckedChange = { genreInstr = it })
+                    Text("Instrumen ikut genre")
+                }
+                ScrollRow {
+                    Button(onClick = { autoArrange(true) }) { Text("🎼 Buat lagu") }
+                    OutlinedButton(onClick = { fillDrums(g) }) { Text("🥁 Ulang drum") }
+                    OutlinedButton(onClick = { fillTrack(1, g, scaleType, false) }) { Text("🎸 Ulang bass") }
+                    OutlinedButton(onClick = { fillTrack(2, g, scaleType, false) }) { Text("🎹 Ulang akor") }
+                    OutlinedButton(onClick = { fillTrack(0, g, scaleType, false) }) { Text("🎵 Ulang melodi") }
+                    Switch(checked = autoFollow, onCheckedChange = { autoFollow = it })
+                    Text("Ikuti kunci")
+                }
+                Text(
+                    "${g.name} · ${NOTE_NAMES[root]} ${scaleType.label} · $bpm BPM",
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                Text(
+                    "Melodi: ${trackWaves[0].label} · Bass: ${trackWaves[1].label} · Akor: ${trackWaves[2].label}",
+                    fontSize = 12.sp
+                )
+                Text(
+                    "🎤 Vokal: segera hadir (rekam dan upload suara)",
+                    fontSize = 11.sp,
+                    color = Color(0xFF8A90A8)
+                )
+            }
+
             val browserContent: @Composable ColumnScope.() -> Unit = {
                 BrowserTitle("Suara keyboard")
                 Wave.values().forEach { BrowserItem(it.label, wave == it) { wave = it } }
@@ -605,7 +687,8 @@ fun NadaApp(synth: SynthEngine) {
                         browser = browserContent,
                         rack = rackContent,
                         roll = rollContent,
-                        keys = keysContent
+                        keys = keysContent,
+                        auto = autoContent
                     )
                     Row(
                         Modifier.align(Alignment.BottomEnd).padding(6.dp),
@@ -622,6 +705,7 @@ fun NadaApp(synth: SynthEngine) {
                         FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text("Channel Rack") })
                         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Piano Roll") })
                         FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text("Keyboard") })
+                        FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text("Auto Lagu") })
                         Text("Suara")
                         Wave.values().forEach {
                             FilterChip(selected = wave == it, onClick = { wave = it }, label = { Text(it.label) })
@@ -630,7 +714,8 @@ fun NadaApp(synth: SynthEngine) {
                     when (tab) {
                         0 -> rackContent()
                         1 -> rollContent()
-                        else -> keyboardContent()
+                        2 -> keyboardContent()
+                        else -> autoContent()
                     }
                 }
             }
