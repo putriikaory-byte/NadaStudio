@@ -100,12 +100,17 @@ class SynthEngine {
     @Volatile var seqNote = 60
     @Volatile var playing = false
     @Volatile var currentStep = 0
+    @Volatile var exporting = false
     @Volatile private var resetReq = false
     @Volatile private var running = false
     @Volatile private var pos = 0L
     @Volatile private var gateNote = -1
     @Volatile private var offAt = 0L
     @Volatile private var rollActive = false
+    private var seqCounter = 0L
+    private var seqStep = 0
+    private var clickPos = Int.MAX_VALUE
+    private var clickFreq = 1000.0
     private var seed = 12345
     private var track: AudioTrack? = null
     private var thread: Thread? = null
@@ -117,7 +122,7 @@ class SynthEngine {
     }
 
     fun start() {
-        if (running) return
+        if (running || exporting) return
         val frames = 256
         val minBuf = AudioTrack.getMinBufferSize(
             sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -147,6 +152,7 @@ class SynthEngine {
     }
 
     fun stop() {
+        if (exporting) return
         running = false
         playing = false
         thread?.join(500)
@@ -185,6 +191,47 @@ class SynthEngine {
         if (ch == SYNTH_CH) previewNote(seqNote) else hits.add(Hit(ch))
     }
 
+    /**
+     * Render aransemen ke audio tanpa lewat speaker. Panggil setelah stop().
+     * loops = berapa kali pola 16 step diulang; ditambah ekor suara 2 detik.
+     */
+    fun renderOffline(loops: Int): ShortArray {
+        val savedMetro = metronomeOn
+        exporting = true
+        try {
+            voices.clear()
+            hits.clear()
+            for (k in 0 until TRACKS * ROLL_ROWS) rollLeft[k] = 0
+            rollActive = false
+            gateNote = -1
+            clickPos = Int.MAX_VALUE
+            metronomeOn = false
+            val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
+            val stepLen = perBeat / 4
+            val musicFrames = (stepLen * STEPS * loops).toInt()
+            val total = musicFrames + sampleRate * 2
+            val out = ShortArray(total)
+            val buf = ShortArray(256)
+            resetReq = true
+            playing = true
+            var done = 0
+            while (done < total) {
+                if (done >= musicFrames) playing = false
+                val n = minOf(256, total - done)
+                renderFrames(buf, n)
+                System.arraycopy(buf, 0, out, done, n)
+                done += n
+            }
+            playing = false
+            voices.clear()
+            hits.clear()
+            return out
+        } finally {
+            metronomeOn = savedMetro
+            exporting = false
+        }
+    }
+
     private fun nextNoise(): Double {
         seed = seed * 1664525 + 1013904223
         return (seed ushr 8) / 8388608.0 - 1.0
@@ -199,207 +246,207 @@ class SynthEngine {
 
     private fun renderLoop(t: AudioTrack, frames: Int) {
         val buf = ShortArray(frames)
-        val clickLen = (0.03 * sampleRate).toInt()
-        var clickPos = Int.MAX_VALUE
-        var clickFreq = 1000.0
-        var seqCounter = 0L
-        var step = 0
         while (running) {
-            val vol = volume
-            val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
-            val stepLen = perBeat / 4
-            for (i in 0 until frames) {
-                if (resetReq) { resetReq = false; seqCounter = 0; step = 0 }
-                if (!playing && rollActive) {
-                    for (k in 0 until TRACKS * ROLL_ROWS) {
-                        if (rollLeft[k] > 0) { noteOff(rollNote[k], k / ROLL_ROWS); rollLeft[k] = 0 }
-                    }
-                    rollActive = false
-                }
-                var stepTrig = false
-                if (playing) {
-                    if (seqCounter == 0L) {
-                        stepTrig = true
-                        currentStep = step
-                        for (ch in CHANNEL_NAMES.indices) {
-                            if (steps[ch * STEPS + step] && !chMute[ch]) {
-                                if (ch == SYNTH_CH) {
-                                    if (gateNote >= 0) noteOff(gateNote)
-                                    noteOn(seqNote)
-                                    gateNote = seqNote
-                                    offAt = pos + stepLen * 9 / 10
-                                } else {
-                                    hits.add(Hit(ch))
-                                }
-                            }
-                        }
-                        for (tr in 0 until TRACKS) {
-                            for (r in 0 until ROLL_ROWS) {
-                                val k = tr * ROLL_ROWS + r
-                                if (rollLeft[k] > 0) {
-                                    rollLeft[k]--
-                                    if (rollLeft[k] == 0) noteOff(rollNote[k], tr)
-                                }
-                            }
-                        }
-                        for (tr in 0 until TRACKS) {
-                            for (r in 0 until ROLL_ROWS) {
-                                val l = rollLen[tr * ROLL_SIZE + r * STEPS + step]
-                                if (l > 0 && !trackMute[tr]) {
-                                    val k = tr * ROLL_ROWS + r
-                                    if (rollLeft[k] > 0) noteOff(rollNote[k], tr)
-                                    rollNote[k] = ROLL_LOW + r
-                                    noteOn(rollNote[k], trackWave[tr], trackGain[tr], tr)
-                                    rollLeft[k] = l
-                                    rollActive = true
-                                }
-                            }
-                        }
-                    }
-                    seqCounter++
-                    if (seqCounter >= stepLen) { seqCounter = 0; step = (step + 1) % STEPS }
-                }
-                if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote); gateNote = -1 }
-
-                var s = 0.0
-                for (v in voices) {
-                    val wv = v.wave
-                    val oi = wv.ordinal
-                    v.level = if (v.releasing) v.level - relRate[oi] else minOf(1.0, v.level + atkRate[oi])
-                    if (v.level <= 0.0) { voices.remove(v); continue }
-                    val p = v.phase
-                    val m = v.mphase
-                    val ts = v.age / sampleRate.toDouble()
-                    var dec = 1.0
-                    val raw = when (wv) {
-                        Wave.SINE -> sin(2 * PI * p)
-                        Wave.SQUARE -> if (p < 0.5) 1.0 else -1.0
-                        Wave.SAW -> 2 * p - 1
-                        Wave.TRIANGLE -> 4 * abs(p - 0.5) - 1
-                        Wave.PIANO -> {
-                            dec = exp(-ts / 0.5)
-                            additive(p, 1.0, 0.5, 0.25, 0.12, 0.0, 0.0) * 0.6
-                        }
-                        Wave.EPIANO -> {
-                            dec = exp(-ts / 1.2)
-                            sin(2 * PI * p + 1.6 * exp(-ts / 0.25) * sin(2 * PI * m))
-                        }
-                        Wave.ORGAN -> additive(p, 1.0, 0.5, 0.25, 0.0, 0.0, 0.0) * 0.6
-                        Wave.GUITAR -> {
-                            dec = exp(-ts / 0.45)
-                            additive(p, 1.0, 0.6, 0.4, 0.25, 0.0, 0.0) * 0.5
-                        }
-                        Wave.DISTGTR -> {
-                            dec = exp(-ts / 1.5)
-                            tanh(3.0 * additive(p, 1.0, 0.5, 0.35, 0.0, 0.0, 0.0)) * 0.6
-                        }
-                        Wave.HARP -> {
-                            dec = exp(-ts / 1.0)
-                            additive(p, 1.0, 0.4, 0.2, 0.1, 0.0, 0.0) * 0.6
-                        }
-                        Wave.PLUCK -> {
-                            dec = exp(-ts / 0.15)
-                            2 * p - 1
-                        }
-                        Wave.FLUTE -> additive(p, 1.0, 0.22, 0.07, 0.02, 0.0, 0.0) * 0.6 + nextNoise() * 0.025
-                        Wave.SULING -> additive(p, 1.0, 0.12, 0.04, 0.0, 0.0, 0.0) * 0.6 + nextNoise() * 0.05
-                        Wave.CLARINET -> additive(p, 1.0, 0.0, 0.55, 0.0, 0.3, 0.0) * 0.5
-                        Wave.OBOE -> additive(p, 0.6, 1.0, 0.9, 0.5, 0.3, 0.15) * 0.3
-                        Wave.TRUMPET -> additive(p, 1.0, 0.8, 0.65, 0.5, 0.35, 0.2) * 0.25
-                        Wave.SAX -> additive(p, 1.0, 0.6, 0.45, 0.3, 0.2, 0.1) * 0.35 + nextNoise() * 0.02
-                        Wave.VIOLIN -> ((2 * p - 1) * 0.6 + (2 * m - 1) * 0.4) * 0.5
-                        Wave.CELLO -> additive(p, 1.0, 0.7, 0.5, 0.35, 0.2, 0.1) * 0.3
-                        Wave.STRINGS -> ((2 * p - 1) + (2 * m - 1)) * 0.35
-                        Wave.BELL -> {
-                            dec = exp(-ts / 0.7)
-                            sin(2 * PI * p + 2.5 * dec * sin(2 * PI * m))
-                        }
-                        Wave.MARIMBA -> {
-                            dec = exp(-ts / 0.35)
-                            (sin(2 * PI * p) + 0.25 * sin(8 * PI * p)) * 0.9
-                        }
-                        Wave.XYLOPHONE -> {
-                            dec = exp(-ts / 0.18)
-                            (sin(2 * PI * p) + 0.5 * sin(6 * PI * p) + 0.25 * sin(12 * PI * p)) * 0.7
-                        }
-                        Wave.GAMELAN -> {
-                            dec = exp(-ts / 0.9)
-                            (sin(2 * PI * p) + 0.5 * sin(2 * PI * m) + 0.2 * sin(4 * PI * p)) * 0.7
-                        }
-                        Wave.BASS -> sin(2 * PI * p) * 0.8 + (2 * p - 1) * 0.2
-                        Wave.BASS808 -> {
-                            dec = exp(-ts / 0.8)
-                            sin(2 * PI * p)
-                        }
-                        Wave.LEAD -> (if (p < 0.5) 1.0 else -1.0) * 0.35 + (2 * p - 1) * 0.35
-                        Wave.PAD -> (sin(2 * PI * p) + 0.6 * sin(2 * PI * m) + 0.3 * sin(4 * PI * p)) * 0.4
-                        Wave.CHOIR -> additive(p, 0.6, 0.5, 1.0, 0.8, 0.4, 0.2) * 0.22
-                    }
-                    s += raw * v.level * dec * 0.25 * v.gain
-
-                    var pf = 1.0
-                    if (wv.vib) pf = 1.0 + 0.0045 * sin(2 * PI * 5.5 * ts) * minOf(1.0, ts / 0.35)
-                    if (wv == Wave.BASS808) pf = 1.0 + 1.2 * exp(-ts / 0.03)
-                    v.phase += v.freq * pf / sampleRate
-                    if (v.phase >= 1.0) v.phase -= 1.0
-                    val ratio = when (wv) {
-                        Wave.BELL -> 3.5
-                        Wave.EPIANO -> 1.0
-                        Wave.GAMELAN -> 2.76
-                        else -> 1.006
-                    }
-                    v.mphase += v.freq * ratio / sampleRate
-                    if (v.mphase >= 1.0) v.mphase -= 1.0
-                    v.age++
-                }
-
-                for (h in hits) {
-                    val tt = h.t / sampleRate.toDouble()
-                    val n = nextNoise()
-                    val d: Double = when (h.type) {
-                        0 -> {
-                            val f = 45 + 110 * exp(-tt / 0.03)
-                            h.phase += f / sampleRate
-                            sin(2 * PI * h.phase) * exp(-tt / 0.14)
-                        }
-                        1 -> n * exp(-tt / 0.07) * 0.6 + sin(2 * PI * 190 * tt) * exp(-tt / 0.04) * 0.5
-                        2 -> n * exp(-tt / 0.06) * 0.7 * (if (tt < 0.03) 0.6 + 0.4 * sin(2 * PI * 130 * tt) else 1.0)
-                        3 -> {
-                            val hp = n - h.last
-                            h.last = n
-                            hp * exp(-tt / 0.03) * 0.5
-                        }
-                        else -> {
-                            val hp = n - h.last
-                            h.last = n
-                            hp * exp(-tt / 0.18) * 0.5
-                        }
-                    }
-                    s += d * 0.9
-                    h.t++
-                    if (h.t > sampleRate * 0.7) hits.remove(h)
-                }
-
-                if (metronomeOn) {
-                    val beat = if (playing) stepTrig && currentStep % 4 == 0 else pos % perBeat == 0L
-                    if (beat) {
-                        clickPos = 0
-                        clickFreq = if (playing) {
-                            if (currentStep == 0) 1500.0 else 1000.0
-                        } else {
-                            if ((pos / perBeat) % 4 == 0L) 1500.0 else 1000.0
-                        }
-                    }
-                    if (clickPos < clickLen) {
-                        val env = 1.0 - clickPos.toDouble() / clickLen
-                        s += sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
-                        clickPos++
-                    }
-                }
-                pos++
-                buf[i] = (tanh(s * vol) * 32767 * 0.9).toInt().toShort()
-            }
+            renderFrames(buf, frames)
             t.write(buf, 0, frames)
+        }
+    }
+
+    private fun renderFrames(buf: ShortArray, frames: Int) {
+        val vol = volume
+        val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
+        val stepLen = perBeat / 4
+        val clickLen = (0.03 * sampleRate).toInt()
+        for (i in 0 until frames) {
+            if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0 }
+            if (!playing && rollActive) {
+                for (k in 0 until TRACKS * ROLL_ROWS) {
+                    if (rollLeft[k] > 0) { noteOff(rollNote[k], k / ROLL_ROWS); rollLeft[k] = 0 }
+                }
+                rollActive = false
+            }
+            var stepTrig = false
+            if (playing) {
+                if (seqCounter == 0L) {
+                    stepTrig = true
+                    currentStep = seqStep
+                    for (ch in CHANNEL_NAMES.indices) {
+                        if (steps[ch * STEPS + seqStep] && !chMute[ch]) {
+                            if (ch == SYNTH_CH) {
+                                if (gateNote >= 0) noteOff(gateNote)
+                                noteOn(seqNote)
+                                gateNote = seqNote
+                                offAt = pos + stepLen * 9 / 10
+                            } else {
+                                hits.add(Hit(ch))
+                            }
+                        }
+                    }
+                    for (tr in 0 until TRACKS) {
+                        for (r in 0 until ROLL_ROWS) {
+                            val k = tr * ROLL_ROWS + r
+                            if (rollLeft[k] > 0) {
+                                rollLeft[k]--
+                                if (rollLeft[k] == 0) noteOff(rollNote[k], tr)
+                            }
+                        }
+                    }
+                    for (tr in 0 until TRACKS) {
+                        for (r in 0 until ROLL_ROWS) {
+                            val l = rollLen[tr * ROLL_SIZE + r * STEPS + seqStep]
+                            if (l > 0 && !trackMute[tr]) {
+                                val k = tr * ROLL_ROWS + r
+                                if (rollLeft[k] > 0) noteOff(rollNote[k], tr)
+                                rollNote[k] = ROLL_LOW + r
+                                noteOn(rollNote[k], trackWave[tr], trackGain[tr], tr)
+                                rollLeft[k] = l
+                                rollActive = true
+                            }
+                        }
+                    }
+                }
+                seqCounter++
+                if (seqCounter >= stepLen) { seqCounter = 0; seqStep = (seqStep + 1) % STEPS }
+            }
+            if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote); gateNote = -1 }
+
+            var s = 0.0
+            for (v in voices) {
+                val wv = v.wave
+                val oi = wv.ordinal
+                v.level = if (v.releasing) v.level - relRate[oi] else minOf(1.0, v.level + atkRate[oi])
+                if (v.level <= 0.0) { voices.remove(v); continue }
+                val p = v.phase
+                val m = v.mphase
+                val ts = v.age / sampleRate.toDouble()
+                var dec = 1.0
+                val raw = when (wv) {
+                    Wave.SINE -> sin(2 * PI * p)
+                    Wave.SQUARE -> if (p < 0.5) 1.0 else -1.0
+                    Wave.SAW -> 2 * p - 1
+                    Wave.TRIANGLE -> 4 * abs(p - 0.5) - 1
+                    Wave.PIANO -> {
+                        dec = exp(-ts / 0.5)
+                        additive(p, 1.0, 0.5, 0.25, 0.12, 0.0, 0.0) * 0.6
+                    }
+                    Wave.EPIANO -> {
+                        dec = exp(-ts / 1.2)
+                        sin(2 * PI * p + 1.6 * exp(-ts / 0.25) * sin(2 * PI * m))
+                    }
+                    Wave.ORGAN -> additive(p, 1.0, 0.5, 0.25, 0.0, 0.0, 0.0) * 0.6
+                    Wave.GUITAR -> {
+                        dec = exp(-ts / 0.45)
+                        additive(p, 1.0, 0.6, 0.4, 0.25, 0.0, 0.0) * 0.5
+                    }
+                    Wave.DISTGTR -> {
+                        dec = exp(-ts / 1.5)
+                        tanh(3.0 * additive(p, 1.0, 0.5, 0.35, 0.0, 0.0, 0.0)) * 0.6
+                    }
+                    Wave.HARP -> {
+                        dec = exp(-ts / 1.0)
+                        additive(p, 1.0, 0.4, 0.2, 0.1, 0.0, 0.0) * 0.6
+                    }
+                    Wave.PLUCK -> {
+                        dec = exp(-ts / 0.15)
+                        2 * p - 1
+                    }
+                    Wave.FLUTE -> additive(p, 1.0, 0.22, 0.07, 0.02, 0.0, 0.0) * 0.6 + nextNoise() * 0.025
+                    Wave.SULING -> additive(p, 1.0, 0.12, 0.04, 0.0, 0.0, 0.0) * 0.6 + nextNoise() * 0.05
+                    Wave.CLARINET -> additive(p, 1.0, 0.0, 0.55, 0.0, 0.3, 0.0) * 0.5
+                    Wave.OBOE -> additive(p, 0.6, 1.0, 0.9, 0.5, 0.3, 0.15) * 0.3
+                    Wave.TRUMPET -> additive(p, 1.0, 0.8, 0.65, 0.5, 0.35, 0.2) * 0.25
+                    Wave.SAX -> additive(p, 1.0, 0.6, 0.45, 0.3, 0.2, 0.1) * 0.35 + nextNoise() * 0.02
+                    Wave.VIOLIN -> ((2 * p - 1) * 0.6 + (2 * m - 1) * 0.4) * 0.5
+                    Wave.CELLO -> additive(p, 1.0, 0.7, 0.5, 0.35, 0.2, 0.1) * 0.3
+                    Wave.STRINGS -> ((2 * p - 1) + (2 * m - 1)) * 0.35
+                    Wave.BELL -> {
+                        dec = exp(-ts / 0.7)
+                        sin(2 * PI * p + 2.5 * dec * sin(2 * PI * m))
+                    }
+                    Wave.MARIMBA -> {
+                        dec = exp(-ts / 0.35)
+                        (sin(2 * PI * p) + 0.25 * sin(8 * PI * p)) * 0.9
+                    }
+                    Wave.XYLOPHONE -> {
+                        dec = exp(-ts / 0.18)
+                        (sin(2 * PI * p) + 0.5 * sin(6 * PI * p) + 0.25 * sin(12 * PI * p)) * 0.7
+                    }
+                    Wave.GAMELAN -> {
+                        dec = exp(-ts / 0.9)
+                        (sin(2 * PI * p) + 0.5 * sin(2 * PI * m) + 0.2 * sin(4 * PI * p)) * 0.7
+                    }
+                    Wave.BASS -> sin(2 * PI * p) * 0.8 + (2 * p - 1) * 0.2
+                    Wave.BASS808 -> {
+                        dec = exp(-ts / 0.8)
+                        sin(2 * PI * p)
+                    }
+                    Wave.LEAD -> (if (p < 0.5) 1.0 else -1.0) * 0.35 + (2 * p - 1) * 0.35
+                    Wave.PAD -> (sin(2 * PI * p) + 0.6 * sin(2 * PI * m) + 0.3 * sin(4 * PI * p)) * 0.4
+                    Wave.CHOIR -> additive(p, 0.6, 0.5, 1.0, 0.8, 0.4, 0.2) * 0.22
+                }
+                s += raw * v.level * dec * 0.25 * v.gain
+
+                var pf = 1.0
+                if (wv.vib) pf = 1.0 + 0.0045 * sin(2 * PI * 5.5 * ts) * minOf(1.0, ts / 0.35)
+                if (wv == Wave.BASS808) pf = 1.0 + 1.2 * exp(-ts / 0.03)
+                v.phase += v.freq * pf / sampleRate
+                if (v.phase >= 1.0) v.phase -= 1.0
+                val ratio = when (wv) {
+                    Wave.BELL -> 3.5
+                    Wave.EPIANO -> 1.0
+                    Wave.GAMELAN -> 2.76
+                    else -> 1.006
+                }
+                v.mphase += v.freq * ratio / sampleRate
+                if (v.mphase >= 1.0) v.mphase -= 1.0
+                v.age++
+            }
+
+            for (h in hits) {
+                val tt = h.t / sampleRate.toDouble()
+                val n = nextNoise()
+                val d: Double = when (h.type) {
+                    0 -> {
+                        val f = 45 + 110 * exp(-tt / 0.03)
+                        h.phase += f / sampleRate
+                        sin(2 * PI * h.phase) * exp(-tt / 0.14)
+                    }
+                    1 -> n * exp(-tt / 0.07) * 0.6 + sin(2 * PI * 190 * tt) * exp(-tt / 0.04) * 0.5
+                    2 -> n * exp(-tt / 0.06) * 0.7 * (if (tt < 0.03) 0.6 + 0.4 * sin(2 * PI * 130 * tt) else 1.0)
+                    3 -> {
+                        val hp = n - h.last
+                        h.last = n
+                        hp * exp(-tt / 0.03) * 0.5
+                    }
+                    else -> {
+                        val hp = n - h.last
+                        h.last = n
+                        hp * exp(-tt / 0.18) * 0.5
+                    }
+                }
+                s += d * 0.9
+                h.t++
+                if (h.t > sampleRate * 0.7) hits.remove(h)
+            }
+
+            if (metronomeOn) {
+                val beat = if (playing) stepTrig && currentStep % 4 == 0 else pos % perBeat == 0L
+                if (beat) {
+                    clickPos = 0
+                    clickFreq = if (playing) {
+                        if (currentStep == 0) 1500.0 else 1000.0
+                    } else {
+                        if ((pos / perBeat) % 4 == 0L) 1500.0 else 1000.0
+                    }
+                }
+                if (clickPos < clickLen) {
+                    val env = 1.0 - clickPos.toDouble() / clickLen
+                    s += sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
+                    clickPos++
+                }
+            }
+            pos++
+            buf[i] = (tanh(s * vol) * 32767 * 0.9).toInt().toShort()
         }
     }
 }
