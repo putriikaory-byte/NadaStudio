@@ -73,6 +73,22 @@ private fun RowScope.KeyScaleControls(
 }
 
 @Composable
+private fun ChoiceDropdown(prefix: String, items: List<String>, selected: Int, onPick: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text(prefix + items[selected] + " ▾") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            items.forEachIndexed { i, name ->
+                DropdownMenuItem(
+                    text = { Text(name) },
+                    onClick = { onPick(i); open = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun WaveDropdown(current: Wave, onPick: (Wave) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -146,6 +162,9 @@ fun NadaApp(synth: SynthEngine) {
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
             var track by remember { mutableIntStateOf(0) }
             var lenSel by remember { mutableIntStateOf(1) }
+            var arrStyle by remember { mutableIntStateOf(0) }
+            var autoFollow by remember { mutableStateOf(false) }
+            var armed by remember { mutableStateOf(false) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
@@ -215,6 +234,34 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
+            fun autoArrange(setTempo: Boolean) {
+                val d = generateDrums(arrStyle)
+                for (i in grid.indices) { grid[i] = d[i]; synth.steps[i] = d[i] }
+                seqNote = 60 + root
+                if (setTempo) bpm = DRUM_BPM[arrStyle]
+                rollOcts[0] = 2
+                rollOcts[1] = 0
+                rollOcts[2] = 1
+                for (t in 0 until TRACKS) {
+                    val lst = rolls[t]
+                    for (i in lst.indices) { lst[i] = 0; synth.rollLen[t * ROLL_SIZE + i] = 0 }
+                    val notes = when (t) {
+                        1 -> generateBass(root, scaleType, rollOcts[1])
+                        2 -> generateChords(root, scaleType, rollOcts[2])
+                        else -> generateMelody(root, scaleType, rollOcts[0])
+                    }
+                    notes.forEach { (row, step, len) ->
+                        lst[row * STEPS + step] = len
+                        synth.rollLen[t * ROLL_SIZE + row * STEPS + step] = len
+                    }
+                }
+                Toast.makeText(
+                    ctx,
+                    "Aransemen dibuat: ${NOTE_NAMES[root]} ${scaleType.label}, gaya ${DRUM_STYLES[arrStyle]}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+
             fun saveProject() {
                 val ok = ProjectStore.save(
                     ctx,
@@ -236,6 +283,7 @@ fun NadaApp(synth: SynthEngine) {
                     if (!quiet) Toast.makeText(ctx, "Belum ada proyek tersimpan", Toast.LENGTH_SHORT).show()
                     return
                 }
+                autoFollow = false
                 bpm = d.bpm
                 wave = d.wave
                 root = d.root
@@ -262,6 +310,11 @@ fun NadaApp(synth: SynthEngine) {
                 if (ProjectStore.exists(ctx)) loadProject(true)
             }
 
+            LaunchedEffect(root, scaleType) {
+                if (armed && autoFollow) autoArrange(false)
+                armed = true
+            }
+
             val transport: @Composable RowScope.() -> Unit = {
                 Text("Nada Studio", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 Button(onClick = { synth.startSeq() }) { Text("▶ Play") }
@@ -270,6 +323,14 @@ fun NadaApp(synth: SynthEngine) {
                 Text("$bpm BPM", fontWeight = FontWeight.Bold)
                 OutlinedButton(onClick = { bpm = (bpm + 1).coerceAtMost(240) }) { Text("+") }
                 Button(onClick = { tap() }) { Text("TAP") }
+                ChoiceDropdown("Kunci ", NOTE_NAMES, root) { root = it }
+                ChoiceDropdown("", ScaleType.values().map { it.label }, scaleType.ordinal) {
+                    scaleType = ScaleType.values()[it]
+                }
+                ChoiceDropdown("Gaya ", DRUM_STYLES, arrStyle) { arrStyle = it }
+                Button(onClick = { autoArrange(true) }) { Text("🎼 Auto aransemen") }
+                Switch(checked = autoFollow, onCheckedChange = { autoFollow = it })
+                Text("Ikuti kunci")
                 Switch(checked = metro, onCheckedChange = { metro = it })
                 Text("Metronom")
                 OutlinedButton(onClick = { saveProject() }) { Text("💾 Simpan") }
