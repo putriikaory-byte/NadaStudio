@@ -11,10 +11,39 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.tanh
 
-enum class Wave(val label: String) {
+/** atk/rel = waktu naik dan turun volume (detik), vib = ada getaran halus. */
+enum class Wave(
+    val label: String,
+    val atk: Double = 0.005,
+    val rel: Double = 0.2,
+    val vib: Boolean = false
+) {
     SINE("Sine"), SQUARE("Square"), SAW("Saw"), TRIANGLE("Triangle"),
-    ORGAN("Organ"), PIANO("Piano"), PLUCK("Pluck"), BELL("Bell"),
-    BASS("Bass"), GUITAR("Gitar"), STRINGS("Strings"), LEAD("Lead")
+    PIANO("Piano"),
+    EPIANO("Piano listrik", rel = 0.3),
+    ORGAN("Organ"),
+    GUITAR("Gitar akustik", rel = 0.25),
+    DISTGTR("Gitar distorsi"),
+    HARP("Harpa", rel = 0.5),
+    PLUCK("Pluck"),
+    FLUTE("Seruling", atk = 0.06, rel = 0.15, vib = true),
+    SULING("Suling bambu", atk = 0.05, rel = 0.15, vib = true),
+    CLARINET("Klarinet", atk = 0.03),
+    OBOE("Oboe", atk = 0.04, vib = true),
+    TRUMPET("Terompet", atk = 0.03),
+    SAX("Saksofon", atk = 0.04, vib = true),
+    VIOLIN("Biola", atk = 0.08, rel = 0.25, vib = true),
+    CELLO("Cello", atk = 0.1, rel = 0.3, vib = true),
+    STRINGS("Strings", atk = 0.15, rel = 0.4),
+    BELL("Bell"),
+    MARIMBA("Marimba", atk = 0.001, rel = 0.1),
+    XYLOPHONE("Xilofon", atk = 0.001, rel = 0.08),
+    GAMELAN("Gamelan", atk = 0.001, rel = 0.3),
+    BASS("Bass"),
+    BASS808("Bass 808", rel = 0.25),
+    LEAD("Lead"),
+    PAD("Pad", atk = 0.4, rel = 0.6),
+    CHOIR("Paduan suara", atk = 0.25, rel = 0.4, vib = true)
 }
 
 val CHANNEL_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth")
@@ -29,6 +58,8 @@ const val ROLL_SIZE = ROLL_ROWS * STEPS
 /** Synth polifonik + drum + step sequencer + piano roll multi-track. */
 class SynthEngine {
     private val sampleRate = 44100
+    private val atkRate = DoubleArray(Wave.values().size) { 1.0 / (Wave.values()[it].atk * sampleRate) }
+    private val relRate = DoubleArray(Wave.values().size) { 1.0 / (Wave.values()[it].rel * sampleRate) }
 
     private class Voice(
         val note: Int,
@@ -146,7 +177,7 @@ class SynthEngine {
         if (gateNote >= 0) noteOff(gateNote)
         noteOn(n, if (t >= 0) trackWave[t] else wave)
         gateNote = n
-        offAt = pos + sampleRate / 4
+        offAt = pos + sampleRate / 2
     }
 
     /** Coba suara satu channel. */
@@ -159,10 +190,15 @@ class SynthEngine {
         return (seed ushr 8) / 8388608.0 - 1.0
     }
 
+    /** Jumlah gelombang sinus harmonik 1 sampai 6 dengan bobot masing-masing. */
+    private fun additive(
+        p: Double, a1: Double, a2: Double, a3: Double, a4: Double, a5: Double, a6: Double
+    ): Double =
+        a1 * sin(2 * PI * p) + a2 * sin(4 * PI * p) + a3 * sin(6 * PI * p) +
+            a4 * sin(8 * PI * p) + a5 * sin(10 * PI * p) + a6 * sin(12 * PI * p)
+
     private fun renderLoop(t: AudioTrack, frames: Int) {
         val buf = ShortArray(frames)
-        val attack = 1.0 / (0.005 * sampleRate)
-        val release = 1.0 / (0.2 * sampleRate)
         val clickLen = (0.03 * sampleRate).toInt()
         var clickPos = Int.MAX_VALUE
         var clickFreq = 1000.0
@@ -227,40 +263,91 @@ class SynthEngine {
 
                 var s = 0.0
                 for (v in voices) {
-                    v.level = if (v.releasing) v.level - release else minOf(1.0, v.level + attack)
+                    val wv = v.wave
+                    val oi = wv.ordinal
+                    v.level = if (v.releasing) v.level - relRate[oi] else minOf(1.0, v.level + atkRate[oi])
                     if (v.level <= 0.0) { voices.remove(v); continue }
                     val p = v.phase
+                    val m = v.mphase
+                    val ts = v.age / sampleRate.toDouble()
                     var dec = 1.0
-                    val raw = when (v.wave) {
+                    val raw = when (wv) {
                         Wave.SINE -> sin(2 * PI * p)
                         Wave.SQUARE -> if (p < 0.5) 1.0 else -1.0
                         Wave.SAW -> 2 * p - 1
                         Wave.TRIANGLE -> 4 * abs(p - 0.5) - 1
-                        Wave.ORGAN -> (sin(2 * PI * p) + 0.5 * sin(4 * PI * p) + 0.25 * sin(6 * PI * p)) * 0.6
                         Wave.PIANO -> {
-                            dec = exp(-v.age / (0.5 * sampleRate))
-                            (sin(2 * PI * p) + 0.5 * sin(4 * PI * p) + 0.25 * sin(6 * PI * p) + 0.12 * sin(8 * PI * p)) * 0.6
+                            dec = exp(-ts / 0.5)
+                            additive(p, 1.0, 0.5, 0.25, 0.12, 0.0, 0.0) * 0.6
+                        }
+                        Wave.EPIANO -> {
+                            dec = exp(-ts / 1.2)
+                            sin(2 * PI * p + 1.6 * exp(-ts / 0.25) * sin(2 * PI * m))
+                        }
+                        Wave.ORGAN -> additive(p, 1.0, 0.5, 0.25, 0.0, 0.0, 0.0) * 0.6
+                        Wave.GUITAR -> {
+                            dec = exp(-ts / 0.45)
+                            additive(p, 1.0, 0.6, 0.4, 0.25, 0.0, 0.0) * 0.5
+                        }
+                        Wave.DISTGTR -> {
+                            dec = exp(-ts / 1.5)
+                            tanh(3.0 * additive(p, 1.0, 0.5, 0.35, 0.0, 0.0, 0.0)) * 0.6
+                        }
+                        Wave.HARP -> {
+                            dec = exp(-ts / 1.0)
+                            additive(p, 1.0, 0.4, 0.2, 0.1, 0.0, 0.0) * 0.6
                         }
                         Wave.PLUCK -> {
-                            dec = exp(-v.age / (0.15 * sampleRate))
+                            dec = exp(-ts / 0.15)
                             2 * p - 1
                         }
+                        Wave.FLUTE -> additive(p, 1.0, 0.22, 0.07, 0.02, 0.0, 0.0) * 0.6 + nextNoise() * 0.025
+                        Wave.SULING -> additive(p, 1.0, 0.12, 0.04, 0.0, 0.0, 0.0) * 0.6 + nextNoise() * 0.05
+                        Wave.CLARINET -> additive(p, 1.0, 0.0, 0.55, 0.0, 0.3, 0.0) * 0.5
+                        Wave.OBOE -> additive(p, 0.6, 1.0, 0.9, 0.5, 0.3, 0.15) * 0.3
+                        Wave.TRUMPET -> additive(p, 1.0, 0.8, 0.65, 0.5, 0.35, 0.2) * 0.25
+                        Wave.SAX -> additive(p, 1.0, 0.6, 0.45, 0.3, 0.2, 0.1) * 0.35 + nextNoise() * 0.02
+                        Wave.VIOLIN -> ((2 * p - 1) * 0.6 + (2 * m - 1) * 0.4) * 0.5
+                        Wave.CELLO -> additive(p, 1.0, 0.7, 0.5, 0.35, 0.2, 0.1) * 0.3
+                        Wave.STRINGS -> ((2 * p - 1) + (2 * m - 1)) * 0.35
                         Wave.BELL -> {
-                            dec = exp(-v.age / (0.7 * sampleRate))
-                            sin(2 * PI * p + 2.5 * dec * sin(2 * PI * v.mphase))
+                            dec = exp(-ts / 0.7)
+                            sin(2 * PI * p + 2.5 * dec * sin(2 * PI * m))
+                        }
+                        Wave.MARIMBA -> {
+                            dec = exp(-ts / 0.35)
+                            (sin(2 * PI * p) + 0.25 * sin(8 * PI * p)) * 0.9
+                        }
+                        Wave.XYLOPHONE -> {
+                            dec = exp(-ts / 0.18)
+                            (sin(2 * PI * p) + 0.5 * sin(6 * PI * p) + 0.25 * sin(12 * PI * p)) * 0.7
+                        }
+                        Wave.GAMELAN -> {
+                            dec = exp(-ts / 0.9)
+                            (sin(2 * PI * p) + 0.5 * sin(2 * PI * m) + 0.2 * sin(4 * PI * p)) * 0.7
                         }
                         Wave.BASS -> sin(2 * PI * p) * 0.8 + (2 * p - 1) * 0.2
-                        Wave.GUITAR -> {
-                            dec = exp(-v.age / (0.45 * sampleRate))
-                            (sin(2 * PI * p) + 0.6 * sin(4 * PI * p) + 0.4 * sin(6 * PI * p) + 0.25 * sin(8 * PI * p)) * 0.5
+                        Wave.BASS808 -> {
+                            dec = exp(-ts / 0.8)
+                            sin(2 * PI * p)
                         }
-                        Wave.STRINGS -> ((2 * p - 1) + (2 * v.mphase - 1)) * 0.35
                         Wave.LEAD -> (if (p < 0.5) 1.0 else -1.0) * 0.35 + (2 * p - 1) * 0.35
+                        Wave.PAD -> (sin(2 * PI * p) + 0.6 * sin(2 * PI * m) + 0.3 * sin(4 * PI * p)) * 0.4
+                        Wave.CHOIR -> additive(p, 0.6, 0.5, 1.0, 0.8, 0.4, 0.2) * 0.22
                     }
                     s += raw * v.level * dec * 0.25 * v.gain
-                    v.phase += v.freq / sampleRate
+
+                    var pf = 1.0
+                    if (wv.vib) pf = 1.0 + 0.0045 * sin(2 * PI * 5.5 * ts) * minOf(1.0, ts / 0.35)
+                    if (wv == Wave.BASS808) pf = 1.0 + 1.2 * exp(-ts / 0.03)
+                    v.phase += v.freq * pf / sampleRate
                     if (v.phase >= 1.0) v.phase -= 1.0
-                    val ratio = if (v.wave == Wave.BELL) 3.5 else 1.006
+                    val ratio = when (wv) {
+                        Wave.BELL -> 3.5
+                        Wave.EPIANO -> 1.0
+                        Wave.GAMELAN -> 2.76
+                        else -> 1.006
+                    }
                     v.mphase += v.freq * ratio / sampleRate
                     if (v.mphase >= 1.0) v.mphase -= 1.0
                     v.age++
