@@ -1,9 +1,12 @@
 package com.nadastudio.app
 
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -19,6 +22,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -105,6 +111,45 @@ private fun WaveDropdown(current: Wave, onPick: (Wave) -> Unit) {
 }
 
 @Composable
+private fun FileMenu(
+    bpm: Int,
+    onSave: () -> Unit,
+    onLoad: () -> Unit,
+    onExportProject: () -> Unit,
+    onImportProject: () -> Unit,
+    onExportWav: (Int) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text("📁 Berkas ▾") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("💾 Simpan (di dalam aplikasi)") },
+                onClick = { open = false; onSave() }
+            )
+            DropdownMenuItem(
+                text = { Text("📂 Buka (dari dalam aplikasi)") },
+                onClick = { open = false; onLoad() }
+            )
+            DropdownMenuItem(
+                text = { Text("📤 Ekspor proyek ke HP…") },
+                onClick = { open = false; onExportProject() }
+            )
+            DropdownMenuItem(
+                text = { Text("📥 Impor proyek dari HP…") },
+                onClick = { open = false; onImportProject() }
+            )
+            listOf(2, 4, 8, 16).forEach { n ->
+                DropdownMenuItem(
+                    text = { Text("🎧 Ekspor audio WAV · $n× (±${n * 240 / bpm} dtk)") },
+                    onClick = { open = false; onExportWav(n) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun BrowserTitle(text: String) {
     Text(
         text, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF8A3D),
@@ -148,6 +193,7 @@ fun NadaApp(synth: SynthEngine) {
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val ctx = LocalContext.current
+            val scope = rememberCoroutineScope()
             val ws = remember { WorkspaceState() }
             var pcMode by remember { mutableStateOf(true) }
             var bpm by remember { mutableIntStateOf(120) }
@@ -165,6 +211,8 @@ fun NadaApp(synth: SynthEngine) {
             var arrStyle by remember { mutableIntStateOf(0) }
             var autoFollow by remember { mutableStateOf(false) }
             var armed by remember { mutableStateOf(false) }
+            var exportBusy by remember { mutableStateOf(false) }
+            var pendingLoops by remember { mutableIntStateOf(4) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
@@ -262,27 +310,16 @@ fun NadaApp(synth: SynthEngine) {
                 ).show()
             }
 
-            fun saveProject() {
-                val ok = ProjectStore.save(
-                    ctx,
-                    ProjectData(
-                        bpm, wave, root, scaleType, lock, seqNote,
-                        BooleanArray(grid.size) { grid[it] },
-                        BooleanArray(mutes.size) { mutes[it] },
-                        IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
-                        List(TRACKS) { trackWaves[it] },
-                        BooleanArray(TRACKS) { trackMutes[it] }
-                    )
-                )
-                Toast.makeText(ctx, if (ok) "Proyek disimpan" else "Gagal menyimpan", Toast.LENGTH_SHORT).show()
-            }
+            fun currentProject(): ProjectData = ProjectData(
+                bpm, wave, root, scaleType, lock, seqNote,
+                BooleanArray(grid.size) { grid[it] },
+                BooleanArray(mutes.size) { mutes[it] },
+                IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
+                List(TRACKS) { trackWaves[it] },
+                BooleanArray(TRACKS) { trackMutes[it] }
+            )
 
-            fun loadProject(quiet: Boolean) {
-                val d = ProjectStore.load(ctx)
-                if (d == null) {
-                    if (!quiet) Toast.makeText(ctx, "Belum ada proyek tersimpan", Toast.LENGTH_SHORT).show()
-                    return
-                }
+            fun applyProject(d: ProjectData) {
                 autoFollow = false
                 bpm = d.bpm
                 wave = d.wave
@@ -303,7 +340,89 @@ fun NadaApp(synth: SynthEngine) {
                     trackMutes[t] = d.trackMutes[t]
                     synth.trackMute[t] = d.trackMutes[t]
                 }
+            }
+
+            fun saveProject() {
+                val ok = ProjectStore.save(ctx, currentProject())
+                Toast.makeText(ctx, if (ok) "Proyek disimpan" else "Gagal menyimpan", Toast.LENGTH_SHORT).show()
+            }
+
+            fun loadProject(quiet: Boolean) {
+                val d = ProjectStore.load(ctx)
+                if (d == null) {
+                    if (!quiet) Toast.makeText(ctx, "Belum ada proyek tersimpan", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                applyProject(d)
                 if (!quiet) Toast.makeText(ctx, "Proyek dibuka", Toast.LENGTH_SHORT).show()
+            }
+
+            val exportProjectL = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/octet-stream")
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    val ok = try {
+                        ctx.contentResolver.openOutputStream(uri)?.use {
+                            it.write(ProjectStore.toText(currentProject()).toByteArray())
+                        }
+                        true
+                    } catch (e: Throwable) {
+                        false
+                    }
+                    Toast.makeText(
+                        ctx,
+                        if (ok) "Proyek diekspor ke HP" else "Gagal mengekspor proyek",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            val importProjectL = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    val text = try {
+                        ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                    } catch (e: Throwable) {
+                        null
+                    }
+                    val d = if (text != null) ProjectStore.fromText(text) else null
+                    if (d == null) {
+                        Toast.makeText(ctx, "File proyek tidak valid", Toast.LENGTH_SHORT).show()
+                    } else {
+                        applyProject(d)
+                        Toast.makeText(ctx, "Proyek diimpor", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+
+            val exportWavL = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("audio/wav")
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    val loops = pendingLoops
+                    val sec = loops * 240 / bpm
+                    scope.launch {
+                        exportBusy = true
+                        val ok = withContext(Dispatchers.Default) {
+                            try {
+                                synth.stop()
+                                val samples = synth.renderOffline(loops)
+                                ctx.contentResolver.openOutputStream(uri)?.use { WavExport.write(it, samples) }
+                                true
+                            } catch (e: Throwable) {
+                                false
+                            }
+                        }
+                        synth.start()
+                        exportBusy = false
+                        Toast.makeText(
+                            ctx,
+                            if (ok) "Audio disimpan (±$sec detik)" else "Gagal mengekspor audio",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
             }
 
             LaunchedEffect(Unit) {
@@ -333,8 +452,17 @@ fun NadaApp(synth: SynthEngine) {
                 Text("Ikuti kunci")
                 Switch(checked = metro, onCheckedChange = { metro = it })
                 Text("Metronom")
-                OutlinedButton(onClick = { saveProject() }) { Text("💾 Simpan") }
-                OutlinedButton(onClick = { loadProject(false) }) { Text("📂 Buka") }
+                FileMenu(
+                    bpm = bpm,
+                    onSave = { saveProject() },
+                    onLoad = { loadProject(false) },
+                    onExportProject = { exportProjectL.launch("aransemen.nada") },
+                    onImportProject = { importProjectL.launch(arrayOf("*/*")) },
+                    onExportWav = { n ->
+                        pendingLoops = n
+                        exportWavL.launch("aransemen.wav")
+                    }
+                )
                 if (!pcMode) {
                     OutlinedButton(onClick = { pcMode = true }) { Text("🖥 Mode PC") }
                 }
@@ -460,6 +588,12 @@ fun NadaApp(synth: SynthEngine) {
                 BrowserTitle("Proyek")
                 BrowserItem("💾 Simpan", false) { saveProject() }
                 BrowserItem("📂 Buka", false) { loadProject(false) }
+                BrowserItem("📤 Ekspor ke HP", false) { exportProjectL.launch("aransemen.nada") }
+                BrowserItem("📥 Impor dari HP", false) { importProjectL.launch(arrayOf("*/*")) }
+                BrowserItem("🎧 Ekspor WAV (8×)", false) {
+                    pendingLoops = 8
+                    exportWavL.launch("aransemen.wav")
+                }
             }
 
             if (pcMode) {
@@ -499,6 +633,15 @@ fun NadaApp(synth: SynthEngine) {
                         else -> keyboardContent()
                     }
                 }
+            }
+
+            if (exportBusy) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    confirmButton = {},
+                    title = { Text("Mengekspor audio…") },
+                    text = { Text("Mohon tunggu sebentar dan jangan tutup aplikasi.") }
+                )
             }
         }
     }
