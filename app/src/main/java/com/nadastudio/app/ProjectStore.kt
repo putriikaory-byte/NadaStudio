@@ -22,7 +22,7 @@ object ProjectStore {
 
     fun exists(ctx: Context): Boolean = file(ctx).exists()
 
-    fun save(ctx: Context, d: ProjectData): Boolean = try {
+    fun toText(d: ProjectData): String {
         val sb = StringBuilder()
         sb.append("v=2\n")
         sb.append("bpm=").append(d.bpm).append('\n')
@@ -36,20 +36,16 @@ object ProjectStore {
         sb.append("roll=").append(d.roll.joinToString(",")).append('\n')
         sb.append("twaves=").append(d.trackWaves.joinToString(",") { it.name }).append('\n')
         sb.append("tmutes=").append(d.trackMutes.joinToString("") { if (it) "1" else "0" }).append('\n')
-        file(ctx).writeText(sb.toString())
-        true
-    } catch (e: Exception) {
-        false
+        return sb.toString()
     }
 
-    fun load(ctx: Context): ProjectData? = try {
-        val f = file(ctx)
-        if (!f.exists()) {
+    fun fromText(text: String): ProjectData? = try {
+        val m = text.lines()
+            .filter { it.contains("=") }
+            .associate { it.substringBefore("=") to it.substringAfter("=").trim() }
+        if (!m.containsKey("bpm")) {
             null
         } else {
-            val m = f.readLines()
-                .filter { it.contains("=") }
-                .associate { it.substringBefore("=") to it.substringAfter("=") }
             val defaults = listOf(Wave.PIANO, Wave.BASS, Wave.STRINGS)
             ProjectData(
                 bpm = (m["bpm"]?.toInt() ?: 120).coerceIn(40, 240),
@@ -73,6 +69,20 @@ object ProjectStore {
                 trackMutes = BooleanArray(TRACKS) { m["tmutes"]?.getOrNull(it) == '1' }
             )
         }
+    } catch (e: Exception) {
+        null
+    }
+
+    fun save(ctx: Context, d: ProjectData): Boolean = try {
+        file(ctx).writeText(toText(d))
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    fun load(ctx: Context): ProjectData? = try {
+        val f = file(ctx)
+        if (!f.exists()) null else fromText(f.readText())
     } catch (e: Exception) {
         null
     }
