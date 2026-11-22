@@ -33,7 +33,7 @@ private val R_BROWSER = PanelRect(0f, 70f, 220f, 830f)
 private val R_RACK = PanelRect(226f, 70f, 640f, 250f)
 private val R_MIXER = PanelRect(872f, 70f, 888f, 250f)
 private val R_ROLL = PanelRect(226f, 326f, 800f, 390f)
-private val R_LIST = PanelRect(1032f, 326f, 728f, 390f)
+private val R_AUTO = PanelRect(1032f, 326f, 728f, 390f)
 private val R_KEYS = PanelRect(226f, 722f, 1534f, 178f)
 
 /** Status zoom dan geser layar kerja. zoom = 0 berarti pas layar. */
@@ -88,7 +88,8 @@ fun PcWorkspace(
     browser: @Composable ColumnScope.() -> Unit,
     rack: @Composable ColumnScope.() -> Unit,
     roll: @Composable ColumnScope.() -> Unit,
-    keys: @Composable ColumnScope.() -> Unit
+    keys: @Composable ColumnScope.() -> Unit,
+    auto: @Composable ColumnScope.() -> Unit
 ) {
     val base = LocalDensity.current
     BoxWithConstraints(modifier.clipToBounds()) {
@@ -150,9 +151,7 @@ fun PcWorkspace(
                         Placeholder("Mixer hadir di langkah berikutnya")
                     }
                     PanelFrame("Piano Roll", R_ROLL, { zoomTo(R_ROLL) }) { roll() }
-                    PanelFrame("Playlist", R_LIST, { zoomTo(R_LIST) }) {
-                        Placeholder("Playlist hadir di langkah berikutnya")
-                    }
+                    PanelFrame("Auto Lagu", R_AUTO, { zoomTo(R_AUTO) }) { auto() }
                     PanelFrame("Keyboard", R_KEYS, { zoomTo(R_KEYS) }) { keys() }
                 }
             }
