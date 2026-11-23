@@ -74,13 +74,6 @@ private fun PanelFrame(
 }
 
 @Composable
-private fun ColumnScope.Placeholder(text: String) {
-    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-        Text(text, fontSize = 12.sp, color = Color(0xFF8A90A8))
-    }
-}
-
-@Composable
 fun PcWorkspace(
     ws: WorkspaceState,
     modifier: Modifier,
@@ -89,7 +82,8 @@ fun PcWorkspace(
     rack: @Composable ColumnScope.() -> Unit,
     roll: @Composable ColumnScope.() -> Unit,
     keys: @Composable ColumnScope.() -> Unit,
-    auto: @Composable ColumnScope.() -> Unit
+    auto: @Composable ColumnScope.() -> Unit,
+    mixer: @Composable ColumnScope.() -> Unit
 ) {
     val base = LocalDensity.current
     BoxWithConstraints(modifier.clipToBounds()) {
@@ -147,9 +141,7 @@ fun PcWorkspace(
                         }
                     }
                     PanelFrame("Channel Rack", R_RACK, { zoomTo(R_RACK) }) { rack() }
-                    PanelFrame("Mixer", R_MIXER, { zoomTo(R_MIXER) }) {
-                        Placeholder("Mixer hadir di langkah berikutnya")
-                    }
+                    PanelFrame("Mixer", R_MIXER, { zoomTo(R_MIXER) }) { mixer() }
                     PanelFrame("Piano Roll", R_ROLL, { zoomTo(R_ROLL) }) { roll() }
                     PanelFrame("Auto Lagu", R_AUTO, { zoomTo(R_AUTO) }) { auto() }
                     PanelFrame("Keyboard", R_KEYS, { zoomTo(R_KEYS) }) { keys() }
