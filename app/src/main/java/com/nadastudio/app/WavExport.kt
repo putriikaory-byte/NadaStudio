@@ -5,8 +5,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 object WavExport {
-    /** Tulis audio mono 16-bit ke format WAV. */
-    fun write(out: OutputStream, samples: ShortArray, sampleRate: Int = 44100) {
+    /** Tulis audio 16-bit ke format WAV. Data stereo disusun selang-seling kiri, kanan. */
+    fun write(out: OutputStream, samples: ShortArray, sampleRate: Int = 44100, channels: Int = 2) {
         val dataLen = samples.size * 2
         val head = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         head.put("RIFF".toByteArray())
@@ -15,10 +15,10 @@ object WavExport {
         head.put("fmt ".toByteArray())
         head.putInt(16)
         head.putShort(1.toShort())
-        head.putShort(1.toShort())
+        head.putShort(channels.toShort())
         head.putInt(sampleRate)
-        head.putInt(sampleRate * 2)
-        head.putShort(2.toShort())
+        head.putInt(sampleRate * channels * 2)
+        head.putShort((channels * 2).toShort())
         head.putShort(16.toShort())
         head.put("data".toByteArray())
         head.putInt(dataLen)
