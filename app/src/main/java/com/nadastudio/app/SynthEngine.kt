@@ -6,6 +6,7 @@ import android.media.AudioTrack
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.pow
 import kotlin.math.sin
@@ -48,14 +49,16 @@ enum class Wave(
 
 val CHANNEL_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth")
 val TRACK_NAMES = listOf("Melodi", "Bass", "Akor")
+val MIX_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth", "Melodi", "Bass", "Akor", "Live")
 const val STEPS = 16
 const val SYNTH_CH = 5
 const val ROLL_ROWS = 60
 const val ROLL_LOW = 36
 const val TRACKS = 3
 const val ROLL_SIZE = ROLL_ROWS * STEPS
+const val MIX_CH = 10
 
-/** Synth polifonik + drum + step sequencer + piano roll multi-track. */
+/** Synth polifonik + drum + step sequencer + piano roll multi-track + mixer stereo. */
 class SynthEngine {
     private val sampleRate = 44100
     private val atkRate = DoubleArray(Wave.values().size) { 1.0 / (Wave.values()[it].atk * sampleRate) }
@@ -66,7 +69,8 @@ class SynthEngine {
         val freq: Double,
         val wave: Wave,
         val gain: Float,
-        val owner: Int
+        val owner: Int,
+        val strip: Int
     ) {
         var phase = 0.0
         var mphase = 0.0
@@ -81,6 +85,54 @@ class SynthEngine {
         var last = 0.0
     }
 
+    private class Comb(size: Int) {
+        private val buf = DoubleArray(size)
+        private var idx = 0
+        private var store = 0.0
+        fun process(x: Double): Double {
+            val y = buf[idx]
+            store = y * 0.8 + store * 0.2
+            buf[idx] = x + store * 0.84
+            idx++
+            if (idx >= buf.size) idx = 0
+            return y
+        }
+        fun clear() { buf.fill(0.0); idx = 0; store = 0.0 }
+    }
+
+    private class Allpass(size: Int) {
+        private val buf = DoubleArray(size)
+        private var idx = 0
+        fun process(x: Double): Double {
+            val b = buf[idx]
+            val y = -x + b
+            buf[idx] = x + b * 0.5
+            idx++
+            if (idx >= buf.size) idx = 0
+            return y
+        }
+        fun clear() { buf.fill(0.0); idx = 0 }
+    }
+
+    private class Reverb(spread: Int) {
+        private val combs = arrayOf(
+            Comb(1116 + spread), Comb(1188 + spread), Comb(1277 + spread), Comb(1356 + spread)
+        )
+        private val ap1 = Allpass(556 + spread)
+        private val ap2 = Allpass(441 + spread)
+        fun process(x: Double): Double {
+            val inp = x * 0.015
+            var s = 0.0
+            for (c in combs) s += c.process(inp)
+            return ap2.process(ap1.process(s))
+        }
+        fun clear() {
+            for (c in combs) c.clear()
+            ap1.clear()
+            ap2.clear()
+        }
+    }
+
     private val voices = CopyOnWriteArrayList<Voice>()
     private val hits = CopyOnWriteArrayList<Hit>()
 
@@ -93,6 +145,19 @@ class SynthEngine {
     private val rollLeft = IntArray(TRACKS * ROLL_ROWS)
     private val rollNote = IntArray(TRACKS * ROLL_ROWS)
 
+    val mixVol = FloatArray(MIX_CH) { 0.8f }
+    val mixPan = FloatArray(MIX_CH)
+    val mixSolo = BooleanArray(MIX_CH)
+    val peak = FloatArray(MIX_CH)
+    private val gainL = DoubleArray(MIX_CH)
+    private val gainR = DoubleArray(MIX_CH)
+    private val blockPeak = DoubleArray(MIX_CH)
+    private val revL = Reverb(0)
+    private val revR = Reverb(23)
+    private val delayBufL = DoubleArray(sampleRate * 2)
+    private val delayBufR = DoubleArray(sampleRate * 2)
+    private var delayW = 0
+
     @Volatile var wave = Wave.SINE
     @Volatile var volume = 0.8f
     @Volatile var bpm = 120
@@ -101,10 +166,14 @@ class SynthEngine {
     @Volatile var playing = false
     @Volatile var currentStep = 0
     @Volatile var exporting = false
+    @Volatile var liveMute = false
+    @Volatile var reverbMix = 0.15f
+    @Volatile var delayMix = 0f
     @Volatile private var resetReq = false
     @Volatile private var running = false
     @Volatile private var pos = 0L
     @Volatile private var gateNote = -1
+    @Volatile private var gateOwner = -1
     @Volatile private var offAt = 0L
     @Volatile private var rollActive = false
     private var seqCounter = 0L
@@ -125,7 +194,7 @@ class SynthEngine {
         if (running || exporting) return
         val frames = 256
         val minBuf = AudioTrack.getMinBufferSize(
-            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+            sampleRate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT
         )
         val t = AudioTrack.Builder()
             .setAudioAttributes(
@@ -137,9 +206,9 @@ class SynthEngine {
                 AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build()
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build()
             )
-            .setBufferSizeInBytes(maxOf(minBuf, frames * 4))
+            .setBufferSizeInBytes(maxOf(minBuf, frames * 8))
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
         track = t
@@ -168,9 +237,15 @@ class SynthEngine {
     fun startSeq() { resetReq = true; playing = true }
     fun stopSeq() { playing = false }
 
+    private fun stripOf(owner: Int): Int = when {
+        owner in 0 until TRACKS -> CHANNEL_NAMES.size + owner
+        owner == SYNTH_CH -> SYNTH_CH
+        else -> MIX_CH - 1
+    }
+
     fun noteOn(note: Int, w: Wave = wave, gain: Float = 1f, owner: Int = -1) {
         if (voices.any { it.note == note && it.owner == owner && !it.releasing }) return
-        voices.add(Voice(note, 440.0 * 2.0.pow((note - 69) / 12.0), w, gain, owner))
+        voices.add(Voice(note, 440.0 * 2.0.pow((note - 69) / 12.0), w, gain, owner, stripOf(owner)))
     }
 
     fun noteOff(note: Int, owner: Int = -1) {
@@ -180,9 +255,10 @@ class SynthEngine {
 
     /** Bunyikan satu nada singkat; t = nomor track (untuk memakai instrumennya). */
     fun previewNote(n: Int, t: Int = -1) {
-        if (gateNote >= 0) noteOff(gateNote)
+        if (gateNote >= 0) noteOff(gateNote, gateOwner)
         noteOn(n, if (t >= 0) trackWave[t] else wave)
         gateNote = n
+        gateOwner = -1
         offAt = pos + sampleRate / 2
     }
 
@@ -192,8 +268,9 @@ class SynthEngine {
     }
 
     /**
-     * Render aransemen ke audio tanpa lewat speaker. Panggil setelah stop().
+     * Render aransemen ke audio stereo tanpa lewat speaker. Panggil setelah stop().
      * loops = berapa kali pola 16 step diulang; ditambah ekor suara 2 detik.
+     * Hasil: sampel selang-seling kiri, kanan.
      */
     fun renderOffline(loops: Int): ShortArray {
         val savedMetro = metronomeOn
@@ -205,13 +282,17 @@ class SynthEngine {
             rollActive = false
             gateNote = -1
             clickPos = Int.MAX_VALUE
+            revL.clear()
+            revR.clear()
+            delayBufL.fill(0.0)
+            delayBufR.fill(0.0)
             metronomeOn = false
             val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
             val stepLen = perBeat / 4
             val musicFrames = (stepLen * STEPS * loops).toInt()
             val total = musicFrames + sampleRate * 2
-            val out = ShortArray(total)
-            val buf = ShortArray(256)
+            val out = ShortArray(total * 2)
+            val buf = ShortArray(256 * 2)
             resetReq = true
             playing = true
             var done = 0
@@ -219,7 +300,7 @@ class SynthEngine {
                 if (done >= musicFrames) playing = false
                 val n = minOf(256, total - done)
                 renderFrames(buf, n)
-                System.arraycopy(buf, 0, out, done, n)
+                System.arraycopy(buf, 0, out, done * 2, n * 2)
                 done += n
             }
             playing = false
@@ -244,11 +325,29 @@ class SynthEngine {
         a1 * sin(2 * PI * p) + a2 * sin(4 * PI * p) + a3 * sin(6 * PI * p) +
             a4 * sin(8 * PI * p) + a5 * sin(10 * PI * p) + a6 * sin(12 * PI * p)
 
+    /** Hitung penguatan kiri-kanan tiap jalur dari volume, pan, mute, dan solo. */
+    private fun updateGains() {
+        var anySolo = false
+        for (i in 0 until MIX_CH) if (mixSolo[i]) anySolo = true
+        for (i in 0 until MIX_CH) {
+            val muted = when {
+                i < CHANNEL_NAMES.size -> chMute[i]
+                i < CHANNEL_NAMES.size + TRACKS -> trackMute[i - CHANNEL_NAMES.size]
+                else -> liveMute
+            }
+            val on = !muted && (!anySolo || mixSolo[i])
+            val g = if (on) mixVol[i] * 1.25 else 0.0
+            val a = (mixPan[i].toDouble().coerceIn(-1.0, 1.0) + 1.0) * PI / 4.0
+            gainL[i] = g * cos(a) * 1.4142
+            gainR[i] = g * sin(a) * 1.4142
+        }
+    }
+
     private fun renderLoop(t: AudioTrack, frames: Int) {
-        val buf = ShortArray(frames)
+        val buf = ShortArray(frames * 2)
         while (running) {
             renderFrames(buf, frames)
-            t.write(buf, 0, frames)
+            t.write(buf, 0, frames * 2)
         }
     }
 
@@ -257,6 +356,10 @@ class SynthEngine {
         val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
         val stepLen = perBeat / 4
         val clickLen = (0.03 * sampleRate).toInt()
+        val revAmt = reverbMix.toDouble()
+        val dlyAmt = delayMix.toDouble()
+        val delayLen = (perBeat / 2).toInt().coerceIn(1, delayBufL.size - 1)
+        updateGains()
         for (i in 0 until frames) {
             if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0 }
             if (!playing && rollActive) {
@@ -273,9 +376,10 @@ class SynthEngine {
                     for (ch in CHANNEL_NAMES.indices) {
                         if (steps[ch * STEPS + seqStep] && !chMute[ch]) {
                             if (ch == SYNTH_CH) {
-                                if (gateNote >= 0) noteOff(gateNote)
-                                noteOn(seqNote)
+                                if (gateNote >= 0) noteOff(gateNote, gateOwner)
+                                noteOn(seqNote, wave, 1f, SYNTH_CH)
                                 gateNote = seqNote
+                                gateOwner = SYNTH_CH
                                 offAt = pos + stepLen * 9 / 10
                             } else {
                                 hits.add(Hit(ch))
@@ -308,9 +412,10 @@ class SynthEngine {
                 seqCounter++
                 if (seqCounter >= stepLen) { seqCounter = 0; seqStep = (seqStep + 1) % STEPS }
             }
-            if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote); gateNote = -1 }
+            if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote, gateOwner); gateNote = -1 }
 
-            var s = 0.0
+            var l = 0.0
+            var r = 0.0
             for (v in voices) {
                 val wv = v.wave
                 val oi = wv.ordinal
@@ -384,7 +489,12 @@ class SynthEngine {
                     Wave.PAD -> (sin(2 * PI * p) + 0.6 * sin(2 * PI * m) + 0.3 * sin(4 * PI * p)) * 0.4
                     Wave.CHOIR -> additive(p, 0.6, 0.5, 1.0, 0.8, 0.4, 0.2) * 0.22
                 }
-                s += raw * v.level * dec * 0.25 * v.gain
+                val x = raw * v.level * dec * 0.25 * v.gain
+                val si = v.strip
+                l += x * gainL[si]
+                r += x * gainR[si]
+                val ax = abs(x) * maxOf(gainL[si], gainR[si])
+                if (ax > blockPeak[si]) blockPeak[si] = ax
 
                 var pf = 1.0
                 if (wv.vib) pf = 1.0 + 0.0045 * sin(2 * PI * 5.5 * ts) * minOf(1.0, ts / 0.35)
@@ -424,9 +534,30 @@ class SynthEngine {
                         hp * exp(-tt / 0.18) * 0.5
                     }
                 }
-                s += d * 0.9
+                val x = d * 0.9
+                val si = h.type
+                l += x * gainL[si]
+                r += x * gainR[si]
+                val ax = abs(x) * maxOf(gainL[si], gainR[si])
+                if (ax > blockPeak[si]) blockPeak[si] = ax
                 h.t++
                 if (h.t > sampleRate * 0.7) hits.remove(h)
+            }
+
+            if (revAmt > 0.001) {
+                val inp = (l + r) * 0.5
+                l += revL.process(inp) * revAmt * 6.0
+                r += revR.process(inp) * revAmt * 6.0
+            }
+            if (dlyAmt > 0.001) {
+                val rp = (delayW - delayLen + delayBufL.size) % delayBufL.size
+                val dl = delayBufL[rp]
+                val dr = delayBufR[rp]
+                delayBufL[delayW] = l + dr * 0.4
+                delayBufR[delayW] = r + dl * 0.4
+                l += dl * dlyAmt
+                r += dr * dlyAmt
+                delayW = (delayW + 1) % delayBufL.size
             }
 
             if (metronomeOn) {
@@ -441,12 +572,19 @@ class SynthEngine {
                 }
                 if (clickPos < clickLen) {
                     val env = 1.0 - clickPos.toDouble() / clickLen
-                    s += sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
+                    val c = sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
+                    l += c
+                    r += c
                     clickPos++
                 }
             }
             pos++
-            buf[i] = (tanh(s * vol) * 32767 * 0.9).toInt().toShort()
+            buf[i * 2] = (tanh(l * vol) * 32767 * 0.9).toInt().toShort()
+            buf[i * 2 + 1] = (tanh(r * vol) * 32767 * 0.9).toInt().toShort()
+        }
+        for (k in 0 until MIX_CH) {
+            peak[k] = maxOf(blockPeak[k].toFloat(), peak[k] * 0.85f)
+            blockPeak[k] = 0.0
         }
     }
 }
