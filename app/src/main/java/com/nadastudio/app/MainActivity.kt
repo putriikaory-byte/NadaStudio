@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -204,6 +205,9 @@ fun NadaApp(synth: SynthEngine) {
             var lock by remember { mutableStateOf(false) }
             var octave by remember { mutableIntStateOf(3) }
             var volume by remember { mutableFloatStateOf(0.8f) }
+            var reverb by remember { mutableFloatStateOf(synth.reverbMix) }
+            var delayFx by remember { mutableFloatStateOf(synth.delayMix) }
+            var liveMute by remember { mutableStateOf(false) }
             var tab by remember { mutableIntStateOf(0) }
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
             var track by remember { mutableIntStateOf(0) }
@@ -250,11 +254,32 @@ fun NadaApp(synth: SynthEngine) {
                     repeat(TRACKS) { l.add(synth.trackMute[it]) }
                 }
             }
+            val mixVols = remember {
+                mutableStateListOf<Float>().also { l ->
+                    repeat(MIX_CH) { l.add(synth.mixVol[it]) }
+                }
+            }
+            val mixPans = remember {
+                mutableStateListOf<Float>().also { l ->
+                    repeat(MIX_CH) { l.add(synth.mixPan[it]) }
+                }
+            }
+            val mixSolos = remember {
+                mutableStateListOf<Boolean>().also { l ->
+                    repeat(MIX_CH) { l.add(false) }
+                }
+            }
+            val meters = remember {
+                mutableStateListOf<Float>().also { l ->
+                    repeat(MIX_CH) { l.add(0f) }
+                }
+            }
 
             SideEffect {
                 synth.bpm = bpm; synth.metronomeOn = metro
                 synth.wave = wave; synth.volume = volume
                 synth.seqNote = seqNote
+                synth.reverbMix = reverb; synth.delayMix = delayFx
             }
 
             fun tap() {
@@ -451,6 +476,13 @@ fun NadaApp(synth: SynthEngine) {
 
             LaunchedEffect(Unit) {
                 if (ProjectStore.exists(ctx)) loadProject(true)
+            }
+
+            LaunchedEffect(Unit) {
+                while (true) {
+                    for (i in 0 until MIX_CH) meters[i] = synth.peak[i]
+                    delay(60)
+                }
             }
 
             LaunchedEffect(root, scaleType) {
@@ -664,6 +696,47 @@ fun NadaApp(synth: SynthEngine) {
                 )
             }
 
+            val mixerContent: @Composable ColumnScope.() -> Unit = {
+                val mutedList = List(MIX_CH) { i ->
+                    when {
+                        i < CHANNEL_NAMES.size -> mutes[i]
+                        i < CHANNEL_NAMES.size + TRACKS -> trackMutes[i - CHANNEL_NAMES.size]
+                        else -> liveMute
+                    }
+                }
+                MixerPanel(
+                    names = MIX_NAMES,
+                    vols = mixVols,
+                    pans = mixPans,
+                    mutes = mutedList,
+                    solos = mixSolos,
+                    meters = meters,
+                    onVol = { i, v -> mixVols[i] = v; synth.mixVol[i] = v },
+                    onPan = { i, p -> mixPans[i] = p; synth.mixPan[i] = p },
+                    onMute = { i ->
+                        if (i < CHANNEL_NAMES.size) {
+                            mutes[i] = !mutes[i]
+                            synth.chMute[i] = mutes[i]
+                        } else if (i < CHANNEL_NAMES.size + TRACKS) {
+                            val t = i - CHANNEL_NAMES.size
+                            trackMutes[t] = !trackMutes[t]
+                            synth.trackMute[t] = trackMutes[t]
+                        } else {
+                            liveMute = !liveMute
+                            synth.liveMute = liveMute
+                        }
+                    },
+                    onSolo = { i -> mixSolos[i] = !mixSolos[i]; synth.mixSolo[i] = mixSolos[i] },
+                    master = volume,
+                    onMaster = { volume = it },
+                    reverb = reverb,
+                    onReverb = { reverb = it },
+                    dly = delayFx,
+                    onDly = { delayFx = it },
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                )
+            }
+
             val browserContent: @Composable ColumnScope.() -> Unit = {
                 BrowserTitle("Suara keyboard")
                 Wave.values().forEach { BrowserItem(it.label, wave == it) { wave = it } }
@@ -688,7 +761,8 @@ fun NadaApp(synth: SynthEngine) {
                         rack = rackContent,
                         roll = rollContent,
                         keys = keysContent,
-                        auto = autoContent
+                        auto = autoContent,
+                        mixer = mixerContent
                     )
                     Row(
                         Modifier.align(Alignment.BottomEnd).padding(6.dp),
@@ -706,6 +780,7 @@ fun NadaApp(synth: SynthEngine) {
                         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Piano Roll") })
                         FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text("Keyboard") })
                         FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text("Auto Lagu") })
+                        FilterChip(selected = tab == 4, onClick = { tab = 4 }, label = { Text("Mixer") })
                         Text("Suara")
                         Wave.values().forEach {
                             FilterChip(selected = wave == it, onClick = { wave = it }, label = { Text(it.label) })
@@ -715,7 +790,8 @@ fun NadaApp(synth: SynthEngine) {
                         0 -> rackContent()
                         1 -> rollContent()
                         2 -> keyboardContent()
-                        else -> autoContent()
+                        3 -> autoContent()
+                        else -> mixerContent()
                     }
                 }
             }
