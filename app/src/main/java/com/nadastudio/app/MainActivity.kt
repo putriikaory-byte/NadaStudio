@@ -1,5 +1,7 @@
 package com.nadastudio.app
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -22,10 +24,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -196,6 +200,7 @@ fun NadaApp(synth: SynthEngine) {
             val ctx = LocalContext.current
             val scope = rememberCoroutineScope()
             val ws = remember { WorkspaceState() }
+            val recorder = remember { VoiceRecorder() }
             var pcMode by remember { mutableStateOf(true) }
             var bpm by remember { mutableIntStateOf(120) }
             var metro by remember { mutableStateOf(false) }
@@ -208,6 +213,7 @@ fun NadaApp(synth: SynthEngine) {
             var reverb by remember { mutableFloatStateOf(synth.reverbMix) }
             var delayFx by remember { mutableFloatStateOf(synth.delayMix) }
             var liveMute by remember { mutableStateOf(false) }
+            var vocalMute by remember { mutableStateOf(false) }
             var tab by remember { mutableIntStateOf(0) }
             var seqNote by remember { mutableIntStateOf(synth.seqNote) }
             var track by remember { mutableIntStateOf(0) }
@@ -222,8 +228,18 @@ fun NadaApp(synth: SynthEngine) {
             var autoFollow by remember { mutableStateOf(false) }
             var armed by remember { mutableStateOf(false) }
             var skipEffect by remember { mutableStateOf(false) }
-            var exportBusy by remember { mutableStateOf(false) }
+            var busyMsg by remember { mutableStateOf<String?>(null) }
             var pendingLoops by remember { mutableIntStateOf(4) }
+            var autoSub by remember { mutableIntStateOf(0) }
+            var clipVersion by remember { mutableIntStateOf(0) }
+            var recording by remember { mutableStateOf(false) }
+            var recSeconds by remember { mutableIntStateOf(0) }
+            var monitorRec by remember { mutableStateOf(true) }
+            var vShift by remember { mutableIntStateOf(0) }
+            var vLoop by remember { mutableStateOf(false) }
+            var analysis by remember { mutableStateOf<VocalAnalysis?>(null) }
+            var importBar by remember { mutableIntStateOf(0) }
+            var snapImport by remember { mutableStateOf(true) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
@@ -280,6 +296,11 @@ fun NadaApp(synth: SynthEngine) {
                 synth.wave = wave; synth.volume = volume
                 synth.seqNote = seqNote
                 synth.reverbMix = reverb; synth.delayMix = delayFx
+                synth.vocalShiftMs = vShift; synth.vocalLoop = vLoop
+            }
+
+            fun toast(msg: String) {
+                Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
             }
 
             fun tap() {
@@ -352,11 +373,7 @@ fun NadaApp(synth: SynthEngine) {
                 for (t in 0 until TRACKS) {
                     if (inc[t]) fillTrack(t, g, st, true)
                 }
-                Toast.makeText(
-                    ctx,
-                    "Lagu dibuat: ${g.name}, ${NOTE_NAMES[root]} ${st.label}, ${if (setTempo) g.bpm else bpm} BPM",
-                    Toast.LENGTH_SHORT
-                ).show()
+                toast("Lagu dibuat: ${g.name}, ${NOTE_NAMES[root]} ${st.label}, ${if (setTempo) g.bpm else bpm} BPM")
             }
 
             fun currentProject(): ProjectData = ProjectData(
@@ -365,7 +382,10 @@ fun NadaApp(synth: SynthEngine) {
                 BooleanArray(mutes.size) { mutes[it] },
                 IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
                 List(TRACKS) { trackWaves[it] },
-                BooleanArray(TRACKS) { trackMutes[it] }
+                BooleanArray(TRACKS) { trackMutes[it] },
+                FloatArray(MIX_CH) { mixVols[it] },
+                FloatArray(MIX_CH) { mixPans[it] },
+                reverb, delayFx, volume, vShift, vLoop
             )
 
             fun applyProject(d: ProjectData) {
@@ -389,21 +409,32 @@ fun NadaApp(synth: SynthEngine) {
                     trackMutes[t] = d.trackMutes[t]
                     synth.trackMute[t] = d.trackMutes[t]
                 }
+                for (i in 0 until MIX_CH) {
+                    mixVols[i] = d.mixVol[i]
+                    synth.mixVol[i] = d.mixVol[i]
+                    mixPans[i] = d.mixPan[i]
+                    synth.mixPan[i] = d.mixPan[i]
+                }
+                reverb = d.reverb
+                delayFx = d.delay
+                volume = d.master
+                vShift = d.vShift
+                vLoop = d.vLoop
             }
 
             fun saveProject() {
                 val ok = ProjectStore.save(ctx, currentProject())
-                Toast.makeText(ctx, if (ok) "Proyek disimpan" else "Gagal menyimpan", Toast.LENGTH_SHORT).show()
+                toast(if (ok) "Proyek disimpan" else "Gagal menyimpan")
             }
 
             fun loadProject(quiet: Boolean) {
                 val d = ProjectStore.load(ctx)
                 if (d == null) {
-                    if (!quiet) Toast.makeText(ctx, "Belum ada proyek tersimpan", Toast.LENGTH_SHORT).show()
+                    if (!quiet) toast("Belum ada proyek tersimpan")
                     return
                 }
                 applyProject(d)
-                if (!quiet) Toast.makeText(ctx, "Proyek dibuka", Toast.LENGTH_SHORT).show()
+                if (!quiet) toast("Proyek dibuka")
             }
 
             val exportProjectL = rememberLauncherForActivityResult(
@@ -418,11 +449,7 @@ fun NadaApp(synth: SynthEngine) {
                     } catch (e: Throwable) {
                         false
                     }
-                    Toast.makeText(
-                        ctx,
-                        if (ok) "Proyek diekspor ke HP" else "Gagal mengekspor proyek",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    toast(if (ok) "Proyek diekspor ke HP" else "Gagal mengekspor proyek")
                 }
             }
 
@@ -437,10 +464,10 @@ fun NadaApp(synth: SynthEngine) {
                     }
                     val d = if (text != null) ProjectStore.fromText(text) else null
                     if (d == null) {
-                        Toast.makeText(ctx, "File proyek tidak valid", Toast.LENGTH_SHORT).show()
+                        toast("File proyek tidak valid")
                     } else {
                         applyProject(d)
-                        Toast.makeText(ctx, "Proyek diimpor", Toast.LENGTH_SHORT).show()
+                        toast("Proyek diimpor")
                     }
                 }
             }
@@ -452,7 +479,7 @@ fun NadaApp(synth: SynthEngine) {
                     val loops = pendingLoops
                     val sec = loops * 240 / bpm
                     scope.launch {
-                        exportBusy = true
+                        busyMsg = "Mengekspor audio…"
                         val ok = withContext(Dispatchers.Default) {
                             try {
                                 synth.stop()
@@ -464,7 +491,7 @@ fun NadaApp(synth: SynthEngine) {
                             }
                         }
                         synth.start()
-                        exportBusy = false
+                        busyMsg = null
                         Toast.makeText(
                             ctx,
                             if (ok) "Audio disimpan (±$sec detik)" else "Gagal mengekspor audio",
@@ -474,14 +501,154 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
+            fun setClip(c: ShortArray?) {
+                synth.vocal = c
+                clipVersion++
+                analysis = null
+                importBar = 0
+                scope.launch(Dispatchers.IO) { VocalStore.save(ctx, c) }
+            }
+
+            fun startRecording() {
+                if (!recorder.start()) {
+                    toast("Mikrofon tidak bisa dibuka")
+                    return
+                }
+                recording = true
+                if (monitorRec) {
+                    synth.vocalSuppress = true
+                    synth.startSeq()
+                }
+            }
+
+            fun stopRecording() {
+                val data = recorder.stop()
+                recording = false
+                synth.stopSeq()
+                synth.vocalSuppress = false
+                if (data != null && data.size > CLIP_RATE / 2) {
+                    setClip(data)
+                    if (monitorRec) vShift = -120
+                    toast("Rekaman disimpan (${data.size / CLIP_RATE} detik)")
+                } else {
+                    toast("Rekaman terlalu pendek")
+                }
+            }
+
+            val micPermL = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { ok: Boolean ->
+                if (ok) startRecording() else toast("Izin mikrofon ditolak")
+            }
+
+            fun onRecordTap() {
+                if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    startRecording()
+                } else {
+                    micPermL.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+
+            val uploadL = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    scope.launch {
+                        busyMsg = "Membaca file audio…"
+                        val c = withContext(Dispatchers.Default) {
+                            try {
+                                AudioDecoder.decode(ctx, uri)
+                            } catch (e: Throwable) {
+                                null
+                            }
+                        }
+                        busyMsg = null
+                        if (c == null || c.size < CLIP_RATE / 2) {
+                            toast("File audio tidak bisa dibaca")
+                        } else {
+                            setClip(c)
+                            toast("Suara dimuat (${c.size / CLIP_RATE} detik)")
+                        }
+                    }
+                }
+            }
+
+            fun analyzeClip() {
+                val c = synth.vocal ?: return
+                scope.launch {
+                    busyMsg = "Menganalisis nada vokal…"
+                    val a = withContext(Dispatchers.Default) {
+                        try {
+                            PitchDetect.analyze(c)
+                        } catch (e: Throwable) {
+                            null
+                        }
+                    }
+                    busyMsg = null
+                    analysis = a
+                    importBar = 0
+                    if (a == null || a.notes.isEmpty()) {
+                        toast("Tidak ada nada terdeteksi. Coba rekaman yang lebih jelas.")
+                    }
+                }
+            }
+
+            fun applyKey() {
+                val a = analysis ?: return
+                root = a.keyRoot
+                scaleType = a.keyScale
+                followGenreScale = false
+                toast("Kunci diatur: ${NOTE_NAMES[a.keyRoot]} ${a.keyScale.label}")
+            }
+
+            fun importToRoll() {
+                val a = analysis ?: return
+                val notes = PitchDetect.toRoll(a, bpm, importBar, if (snapImport) scale else null)
+                if (notes.isEmpty()) {
+                    toast("Tidak ada nada di bar ini")
+                    return
+                }
+                val lst = rolls[0]
+                for (i in lst.indices) { lst[i] = 0; synth.rollLen[i] = 0 }
+                notes.forEach { (row, step, len) ->
+                    lst[row * STEPS + step] = len
+                    synth.rollLen[row * STEPS + step] = len
+                }
+                val sorted = notes.map { it.first }.sorted()
+                rollOcts[0] = (sorted[sorted.size / 2] / 12).coerceIn(0, 4)
+                track = 0
+                toast("${notes.size} nada dimasukkan ke track Melodi")
+            }
+
             LaunchedEffect(Unit) {
                 if (ProjectStore.exists(ctx)) loadProject(true)
+            }
+
+            LaunchedEffect(Unit) {
+                val c = withContext(Dispatchers.IO) { VocalStore.load(ctx) }
+                if (c != null) {
+                    synth.vocal = c
+                    clipVersion++
+                }
             }
 
             LaunchedEffect(Unit) {
                 while (true) {
                     for (i in 0 until MIX_CH) meters[i] = synth.peak[i]
                     delay(60)
+                }
+            }
+
+            LaunchedEffect(recording) {
+                while (recording) {
+                    recSeconds = recorder.seconds
+                    if (recSeconds >= CLIP_MAX_SEC) {
+                        stopRecording()
+                        break
+                    }
+                    delay(300)
                 }
             }
 
@@ -690,10 +857,54 @@ fun NadaApp(synth: SynthEngine) {
                     fontSize = 12.sp
                 )
                 Text(
-                    "🎤 Vokal: segera hadir (rekam dan upload suara)",
+                    "🎤 Vokal: buka sub-tab Vokal di atas untuk rekam atau upload suara",
                     fontSize = 11.sp,
                     color = Color(0xFF8A90A8)
                 )
+            }
+
+            val autoPanelContent: @Composable ColumnScope.() -> Unit = {
+                ScrollRow {
+                    FilterChip(selected = autoSub == 0, onClick = { autoSub = 0 }, label = { Text("Auto Lagu") })
+                    FilterChip(selected = autoSub == 1, onClick = { autoSub = 1 }, label = { Text("🎤 Vokal") })
+                }
+                if (autoSub == 0) {
+                    autoContent()
+                } else {
+                    val bars = analysis?.let {
+                        ceil(it.seconds / (240.0 / bpm)).toInt().coerceAtLeast(1)
+                    } ?: 1
+                    VocalPanel(
+                        clip = synth.vocal,
+                        version = clipVersion,
+                        recording = recording,
+                        recSeconds = recSeconds,
+                        monitor = monitorRec,
+                        onMonitor = { monitorRec = it },
+                        onRecord = { onRecordTap() },
+                        onStopRecord = { stopRecording() },
+                        onUpload = { uploadL.launch(arrayOf("audio/*", "*/*")) },
+                        onPlay = { synth.playClip() },
+                        onStop = { synth.stopClip() },
+                        onClear = {
+                            synth.stopClip()
+                            setClip(null)
+                        },
+                        loop = vLoop,
+                        onLoop = { vLoop = it },
+                        shift = vShift,
+                        onShift = { vShift = it },
+                        analysis = analysis,
+                        onAnalyze = { analyzeClip() },
+                        onApplyKey = { applyKey() },
+                        bars = bars,
+                        bar = importBar,
+                        onBar = { importBar = it },
+                        snap = snapImport,
+                        onSnap = { snapImport = it },
+                        onImport = { importToRoll() }
+                    )
+                }
             }
 
             val mixerContent: @Composable ColumnScope.() -> Unit = {
@@ -701,7 +912,8 @@ fun NadaApp(synth: SynthEngine) {
                     when {
                         i < CHANNEL_NAMES.size -> mutes[i]
                         i < CHANNEL_NAMES.size + TRACKS -> trackMutes[i - CHANNEL_NAMES.size]
-                        else -> liveMute
+                        i == LIVE_STRIP -> liveMute
+                        else -> vocalMute
                     }
                 }
                 MixerPanel(
@@ -721,9 +933,12 @@ fun NadaApp(synth: SynthEngine) {
                             val t = i - CHANNEL_NAMES.size
                             trackMutes[t] = !trackMutes[t]
                             synth.trackMute[t] = trackMutes[t]
-                        } else {
+                        } else if (i == LIVE_STRIP) {
                             liveMute = !liveMute
                             synth.liveMute = liveMute
+                        } else {
+                            vocalMute = !vocalMute
+                            synth.vocalMute = vocalMute
                         }
                     },
                     onSolo = { i -> mixSolos[i] = !mixSolos[i]; synth.mixSolo[i] = mixSolos[i] },
@@ -761,7 +976,7 @@ fun NadaApp(synth: SynthEngine) {
                         rack = rackContent,
                         roll = rollContent,
                         keys = keysContent,
-                        auto = autoContent,
+                        auto = autoPanelContent,
                         mixer = mixerContent
                     )
                     Row(
@@ -779,7 +994,7 @@ fun NadaApp(synth: SynthEngine) {
                         FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text("Channel Rack") })
                         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text("Piano Roll") })
                         FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text("Keyboard") })
-                        FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text("Auto Lagu") })
+                        FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text("Auto Lagu / Vokal") })
                         FilterChip(selected = tab == 4, onClick = { tab = 4 }, label = { Text("Mixer") })
                         Text("Suara")
                         Wave.values().forEach {
@@ -790,17 +1005,18 @@ fun NadaApp(synth: SynthEngine) {
                         0 -> rackContent()
                         1 -> rollContent()
                         2 -> keyboardContent()
-                        3 -> autoContent()
+                        3 -> autoPanelContent()
                         else -> mixerContent()
                     }
                 }
             }
 
-            if (exportBusy) {
+            val busy = busyMsg
+            if (busy != null) {
                 AlertDialog(
                     onDismissRequest = {},
                     confirmButton = {},
-                    title = { Text("Mengekspor audio…") },
+                    title = { Text(busy) },
                     text = { Text("Mohon tunggu sebentar dan jangan tutup aplikasi.") }
                 )
             }
