@@ -177,6 +177,13 @@ class SynthEngine {
     @Volatile var vocalSuppress = false
     @Volatile var vocalLoop = false
     @Volatile var vocalShiftMs = 0
+    /**
+     * Aransemen multi-bar dari vokal (lihat AutoArrange.kt). Bila null, pemutar memakai
+     * pola 1 bar lama di [steps]/[rollLen] seperti sebelumnya.
+     */
+    @Volatile var arrangement: VocalArrangement? = null
+    /** Bar yang sedang dimainkan (0-based), hanya bermakna bila [arrangement] tidak null. */
+    @Volatile var currentBar = 0
     @Volatile private var clipResetReq = false
     @Volatile private var resetReq = false
     @Volatile private var running = false
@@ -188,6 +195,7 @@ class SynthEngine {
     private var clipPos = 0L
     private var seqCounter = 0L
     private var seqStep = 0
+    private var seqBar = 0
     private var clickPos = Int.MAX_VALUE
     private var clickFreq = 1000.0
     private var seed = 12345
@@ -243,6 +251,8 @@ class SynthEngine {
         hits.clear()
         for (k in 0 until TRACKS * ROLL_ROWS) rollLeft[k] = 0
         rollActive = false
+        seqBar = 0
+        currentBar = 0
     }
 
     fun startSeq() {
@@ -297,7 +307,9 @@ class SynthEngine {
 
     /**
      * Render aransemen ke audio stereo tanpa lewat speaker. Panggil setelah stop().
-     * loops = berapa kali pola 16 step diulang; ditambah ekor suara 2 detik.
+     * loops = berapa kali pola 16 step diulang; bila ada [arrangement], satu putaran
+     * penuh = [VocalArrangement.bars] bar, jadi teruskan loops = jumlah bar untuk
+     * mengekspor lagu penuh sekali jalan. Ditambah ekor suara 2 detik.
      * Hasil: sampel selang-seling kiri, kanan.
      */
     fun renderOffline(loops: Int): ShortArray {
@@ -394,11 +406,17 @@ class SynthEngine {
         val delayLen = (perBeat / 2).toInt().coerceIn(1, delayBufL.size - 1)
         updateGains()
         for (i in 0 until frames) {
-            if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0 }
+            if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0; seqBar = 0; currentBar = 0 }
             if (clipResetReq) {
                 clipResetReq = false
                 clipPos = -(vocalShiftMs.toLong() * sampleRate / 1000L)
             }
+            // Bar saat ini: pola multi-bar bila ada arrangement, kalau tidak selalu bar 0.
+            val barCount = (arrangement?.bars ?: 1).coerceAtLeast(1)
+            val bar = if (barCount > 1) seqBar % barCount else 0
+            currentBar = bar
+            val drumPat = arrangement?.drums?.getOrNull(bar) ?: steps
+            val barRoll = arrangement?.rolls?.getOrNull(bar)
             if (!playing && rollActive) {
                 for (k in 0 until TRACKS * ROLL_ROWS) {
                     if (rollLeft[k] > 0) { noteOff(rollNote[k], k / ROLL_ROWS); rollLeft[k] = 0 }
@@ -411,7 +429,7 @@ class SynthEngine {
                     stepTrig = true
                     currentStep = seqStep
                     for (ch in CHANNEL_NAMES.indices) {
-                        if (steps[ch * STEPS + seqStep] && !chMute[ch]) {
+                        if (drumPat[ch * STEPS + seqStep] && !chMute[ch]) {
                             if (ch == SYNTH_CH) {
                                 if (gateNote >= 0) noteOff(gateNote, gateOwner)
                                 noteOn(seqNote, wave, 1f, SYNTH_CH)
@@ -434,7 +452,8 @@ class SynthEngine {
                     }
                     for (tr in 0 until TRACKS) {
                         for (r in 0 until ROLL_ROWS) {
-                            val l = rollLen[tr * ROLL_SIZE + r * STEPS + seqStep]
+                            val l = barRoll?.get(tr * ROLL_SIZE + r * STEPS + seqStep)
+                                ?: rollLen[tr * ROLL_SIZE + r * STEPS + seqStep]
                             if (l > 0 && !trackMute[tr]) {
                                 val k = tr * ROLL_ROWS + r
                                 if (rollLeft[k] > 0) noteOff(rollNote[k], tr)
@@ -450,7 +469,12 @@ class SynthEngine {
                 if (seqCounter >= stepLen) {
                     seqCounter = 0
                     seqStep = (seqStep + 1) % STEPS
-                    if (seqStep == 0 && vocalLoop && vocalActive) clipResetReq = true
+                    if (seqStep == 0) {
+                        seqBar++
+                        // Vokal hanya diulang dari awal setelah satu putaran aransemen penuh,
+                        // bukan tiap bar (dulu: tiap 16 step).
+                        if (vocalLoop && vocalActive && seqBar % barCount == 0) clipResetReq = true
+                    }
                 }
             }
             if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote, gateOwner); gateNote = -1 }

@@ -1,6 +1,7 @@
 package com.nadastudio.app
 
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -170,6 +171,12 @@ object PitchDetect {
             }
         }
         return Triple(bestRoot, bestType, bestFit)
+    }
+
+    /** Ubah nada hasil deteksi menjadi (baris, step, panjang) untuk SEMUA bar lagu. */
+    fun toRollMulti(a: VocalAnalysis, bpm: Int, scale: Set<Int>?): List<List<Triple<Int, Int, Int>>> {
+        val bars = ceil(a.seconds / barSeconds(bpm)).toInt().coerceIn(1, 32)
+        return List(bars) { toRoll(a, bpm, it, scale) }
     }
 
     /** Ubah nada hasil deteksi menjadi (baris, step, panjang) untuk satu bar Piano Roll. */
