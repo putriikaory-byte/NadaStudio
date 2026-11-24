@@ -183,6 +183,28 @@ private fun SmallButton(text: String, onClick: () -> Unit) {
     ) { Text(text) }
 }
 
+/** Pemilih bar untuk edit per bar + indikator bar yang sedang dimainkan. */
+@Composable
+private fun RowScope.BarSelector(
+    bars: Int,
+    editBar: Int,
+    onBar: (Int) -> Unit,
+    playBar: Int,
+    playing: Boolean
+) {
+    Text("Bar")
+    OutlinedButton(onClick = { onBar((editBar - 1).coerceAtLeast(0)) }) { Text("−") }
+    Text("${editBar + 1}/$bars", fontWeight = FontWeight.Bold)
+    OutlinedButton(onClick = { onBar((editBar + 1).coerceAtMost(bars - 1)) }) { Text("+") }
+    if (playing && playBar >= 0) {
+        Text(
+            "▶ Bar ${playBar + 1}",
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFFFF4444)
+        )
+    }
+}
+
 private fun noteLabel(n: Int): String = NOTE_NAMES[n % 12] + (n / 12 - 1)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -242,6 +264,14 @@ fun NadaApp(synth: SynthEngine) {
             var arrangementSummary by remember { mutableStateOf<String?>(null) }
             var importBar by remember { mutableIntStateOf(0) }
             var snapImport by remember { mutableStateOf(true) }
+            var metroRec by remember { mutableStateOf(true) }
+            var countInBeat by remember { mutableIntStateOf(0) }
+            var countInWaiting by remember { mutableStateOf(false) }
+            var clipStartStep by remember { mutableIntStateOf(0) }
+            var editBar by remember { mutableIntStateOf(0) }
+            var playBar by remember { mutableIntStateOf(-1) }
+            var playStep by remember { mutableIntStateOf(-1) }
+            var isPlaying by remember { mutableStateOf(false) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
             val taps = remember { mutableListOf<Long>() }
             val scale = remember(root, scaleType) { scaleSet(root, scaleType) }
@@ -294,16 +324,41 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             /**
-             * Salin pola 1 bar yang sedang ditampilkan (bar 1 aransemen) dari
-             * [SynthEngine.steps]/[SynthEngine.rollLen] ke aransemen multi-bar.
-             * Dipanggil di SideEffect dan sebelum proyek disimpan.
+             * Salin pola 1 bar yang sedang ditampilkan (bar [bar] aransemen)
+             * dari [SynthEngine.steps]/[SynthEngine.rollLen] ke aransemen
+             * multi-bar. Dipanggil di SideEffect dan sebelum proyek disimpan.
              */
-            fun syncArrangementBar0() {
+            fun syncArrangementBar(bar: Int) {
                 val arr = vocalArrangement ?: return
-                val d0 = arr.drums.getOrNull(0) ?: return
-                val r0 = arr.rolls.getOrNull(0) ?: return
-                for (i in d0.indices) d0[i] = synth.steps[i]
-                for (i in r0.indices) r0[i] = synth.rollLen[i]
+                val d = arr.drums.getOrNull(bar) ?: return
+                val r = arr.rolls.getOrNull(bar) ?: return
+                for (i in d.indices) d[i] = synth.steps[i]
+                for (i in r.indices) r[i] = synth.rollLen[i]
+            }
+
+            /** Muat bar [bar] aransemen ke Channel Rack / Piano Roll yang ditampilkan. */
+            fun loadArrangementBar(bar: Int) {
+                val arr = vocalArrangement ?: return
+                val d = arr.drums.getOrNull(bar) ?: return
+                val r = arr.rolls.getOrNull(bar) ?: return
+                for (i in grid.indices) { grid[i] = d[i]; synth.steps[i] = d[i] }
+                for (t in 0 until TRACKS) {
+                    for (i in 0 until ROLL_SIZE) {
+                        val v = r[t * ROLL_SIZE + i]
+                        rolls[t][i] = v
+                        synth.rollLen[t * ROLL_SIZE + i] = v
+                    }
+                }
+            }
+
+            /** Pindah bar yang diedit: simpan dulu bar lama, lalu muat bar baru. */
+            fun showArrangementBar(bar: Int) {
+                val arr = vocalArrangement ?: return
+                val b = bar.coerceIn(0, arr.bars - 1)
+                if (b == editBar) return
+                syncArrangementBar(editBar)
+                editBar = b
+                loadArrangementBar(b)
             }
 
             SideEffect {
@@ -312,9 +367,11 @@ fun NadaApp(synth: SynthEngine) {
                 synth.seqNote = seqNote
                 synth.reverbMix = reverb; synth.delayMix = delayFx
                 synth.vocalShiftMs = vShift; synth.vocalLoop = vLoop
-                // Piano Roll / Channel Rack menampilkan bar 1: edit di sana harus
-                // terdengar, jadi salin kembali isi bar 1 ke aransemen multi-bar.
-                syncArrangementBar0()
+                synth.vocalStartStep = clipStartStep
+                // Piano Roll / Channel Rack menampilkan bar yang dipilih:
+                // edit di sana harus terdengar, jadi salin kembali isi bar
+                // yang dipilih ke aransemen multi-bar.
+                syncArrangementBar(editBar)
             }
 
             fun toast(msg: String) {
@@ -372,6 +429,7 @@ fun NadaApp(synth: SynthEngine) {
                 vocalArrangement = null
                 synth.arrangement = null
                 arrangementSummary = null
+                editBar = 0
                 val g = GENRES[genreIdx]
                 var st = scaleType
                 if (followGenreScale && scaleType != g.scale) {
@@ -399,7 +457,7 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             fun currentProject(): ProjectData {
-                syncArrangementBar0()
+                syncArrangementBar(editBar)
                 return ProjectData(
                     bpm, wave, root, scaleType, lock, seqNote,
                     BooleanArray(grid.size) { grid[it] },
@@ -410,7 +468,8 @@ fun NadaApp(synth: SynthEngine) {
                     FloatArray(MIX_CH) { mixVols[it] },
                     FloatArray(MIX_CH) { mixPans[it] },
                     reverb, delayFx, volume, vShift, vLoop,
-                    arrangement = vocalArrangement
+                    arrangement = vocalArrangement,
+                    clipStartStep = clipStartStep
                 )
             }
 
@@ -446,15 +505,19 @@ fun NadaApp(synth: SynthEngine) {
                 volume = d.master
                 vShift = d.vShift
                 vLoop = d.vLoop
+                clipStartStep = d.clipStartStep
                 if (d.arrangement != null) {
                     vocalArrangement = d.arrangement
                     synth.arrangement = d.arrangement
                     arrangementSummary = d.arrangement.summaryText()
                     pendingLoops = d.arrangement.bars
+                    editBar = 0
+                    loadArrangementBar(0)
                 } else {
                     vocalArrangement = null
                     synth.arrangement = null
                     arrangementSummary = null
+                    editBar = 0
                 }
             }
 
@@ -542,6 +605,7 @@ fun NadaApp(synth: SynthEngine) {
                 clipVersion++
                 analysis = null
                 importBar = 0
+                clipStartStep = 0
                 // Klip baru (atau dihapus) membuat aransemen dari vokal lama tidak berlaku.
                 vocalArrangement = null
                 synth.arrangement = null
@@ -568,24 +632,48 @@ fun NadaApp(synth: SynthEngine) {
                 synth.vocalSuppress = false
                 if (data != null && data.size > CLIP_RATE / 2) {
                     setClip(data)
-                    if (monitorRec) vShift = -120
+                    // Tidak ada lagi geser otomatis -120 ms seperti dulu:
+                    // onset alignment + count-in sudah menaruh vokal di ketukan 1.
                     toast("Rekaman disimpan (${data.size / CLIP_RATE} detik)")
                 } else {
                     toast("Rekaman terlalu pendek")
                 }
             }
 
+            /**
+             * Rekam dengan count-in 1 bar bila metronom rekam aktif: klik
+             * metronom berbunyi 4 ketuk dulu (angka 4..1 tampil di layar),
+             * BARU perekam dan lagu mulai — jadi vokal jatuh di ketukan 1.
+             * Tanpa metronom, rekam langsung seperti sebelumnya.
+             */
+            fun beginRecord() {
+                if (!metroRec) {
+                    startRecording()
+                    return
+                }
+                countInWaiting = true
+                countInBeat = 4
+                synth.start()
+                synth.startCountIn(4)
+            }
+
+            fun cancelCountIn() {
+                countInWaiting = false
+                countInBeat = 0
+                synth.cancelCountIn()
+            }
+
             val micPermL = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission()
             ) { ok: Boolean ->
-                if (ok) startRecording() else toast("Izin mikrofon ditolak")
+                if (ok) beginRecord() else toast("Izin mikrofon ditolak")
             }
 
             fun onRecordTap() {
                 if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
                 ) {
-                    startRecording()
+                    beginRecord()
                 } else {
                     micPermL.launch(Manifest.permission.RECORD_AUDIO)
                 }
@@ -645,6 +733,8 @@ fun NadaApp(synth: SynthEngine) {
 
             fun importToRoll() {
                 val a = analysis ?: return
+                // Impor ke bar yang dipilih pengguna (bukan selalu bar yang tampil).
+                showArrangementBar(importBar)
                 val notes = PitchDetect.toRoll(a, bpm, importBar, if (snapImport) scale else null)
                 if (notes.isEmpty()) {
                     toast("Tidak ada nada di bar ini")
@@ -682,6 +772,7 @@ fun NadaApp(synth: SynthEngine) {
                 rollOcts[1] = 0
                 rollOcts[2] = 1
                 // Tampilkan bar pertama di Channel Rack / Piano Roll.
+                editBar = 0
                 val d0 = arr.drums[0]
                 for (i in grid.indices) { grid[i] = d0[i]; synth.steps[i] = d0[i] }
                 val r0 = arr.rolls[0]
@@ -695,6 +786,8 @@ fun NadaApp(synth: SynthEngine) {
                 seqNote = 60 + arr.root
                 // Vokal berbunyi sekali sepanjang lagu, bukan diulang tiap bar.
                 vLoop = false
+                // Klip hasil proses sudah disejajarkan ke ketukan 1.
+                clipStartStep = 0
                 pendingLoops = arr.bars
                 vocalArrangement = arr
                 synth.arrangement = arr
@@ -702,38 +795,57 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             /**
-             * "Aransemen dari Vokal": rekaman -> analisis nada/kunci -> perkiraan tempo ->
+             * "Aransemen dari Vokal" ala FL Studio: rekaman -> analisis nada/kunci ->
+             * sejajarkan onset ke ketukan 1 -> stretch vokal ke tempo proyek ->
              * aransemen multi-bar mengikuti nada vokal (lihat buildArrangement).
              * Genre yang dipilih pengguna tetap dipakai; vokal tetap melodi utama.
+             * Tempo proyek saat ini dipakai sebagai target stretch; kalau rasio
+             * stretch terlalu ekstrem, BPM proyek justru mengikuti tempo vokal.
              */
             fun arrangeFromVocal() {
                 val c = synth.vocal ?: return
                 val genre = GENRES[genreIdx]
+                val targetBpm = bpm
                 scope.launch {
                     busyMsg = "Menganalisis vokal dan membuat aransemen…"
-                    val result: Pair<VocalAnalysis, VocalArrangement?>? = withContext(Dispatchers.Default) {
-                        try {
-                            val a = PitchDetect.analyze(c)
-                            if (a == null) null
-                            else if (a.notes.isEmpty()) Pair(a, null)
-                            else Pair(a, buildArrangement(a, genre))
-                        } catch (e: Throwable) {
-                            null
+                    val result: Triple<VocalAnalysis, VocalArrangement?, ProcessedVocal?>? =
+                        withContext(Dispatchers.Default) {
+                            try {
+                                val a = PitchDetect.analyze(c)
+                                if (a == null) null
+                                else if (a.notes.isEmpty()) Triple(a, null, null)
+                                else {
+                                    val processed = processVocalForArrangement(
+                                        c, a, targetBpm, genre.bpm
+                                    )
+                                    val arr = buildArrangement(
+                                        processed.analysis, genre, processed.usedBpm
+                                    )
+                                    Triple(processed.analysis, arr, processed)
+                                }
+                            } catch (e: Throwable) {
+                                null
+                            }
                         }
-                    }
                     busyMsg = null
                     if (result == null) {
                         toast("Gagal menganalisis vokal")
                         return@launch
                     }
-                    val (a, arr) = result
+                    val (a, arr, processed) = result
                     analysis = a
                     importBar = 0
-                    if (arr == null) {
+                    if (arr == null || processed == null) {
                         toast("Tidak ada nada terdeteksi. Coba rekaman yang lebih jelas dan tanpa musik latar.")
                         return@launch
                     }
+                    // Pakai klip vokal yang sudah disejajarkan + di-stretch
+                    // (bukan klip mentah), supaya playback dan export sinkron.
+                    synth.vocal = processed.clip
+                    clipVersion++
+                    scope.launch(Dispatchers.IO) { VocalStore.save(ctx, processed.clip) }
                     applyVocalArrangement(arr)
+                    arrangementSummary = arr.summaryText() + "\n" + processed.note
                     toast("Aransemen dibuat: ${arr.genreName}, ${NOTE_NAMES[arr.root]} ${arr.scale.label}, ${arr.bpm} BPM, ${arr.bars} bar")
                 }
             }
@@ -753,7 +865,20 @@ fun NadaApp(synth: SynthEngine) {
             LaunchedEffect(Unit) {
                 while (true) {
                     for (i in 0 until MIX_CH) meters[i] = synth.peak[i]
-                    delay(60)
+                    playBar = if (synth.playing) synth.currentBar else -1
+                    playStep = if (synth.playing) synth.currentStep else -1
+                    isPlaying = synth.playing
+                    // Count-in selesai (hitungan 0) -> mulai merekam.
+                    if (countInWaiting) {
+                        val c = synth.countInBeatNow
+                        if (c != countInBeat) countInBeat = c
+                        if (c == 0) {
+                            countInWaiting = false
+                            countInBeat = 0
+                            startRecording()
+                        }
+                    }
+                    delay(50)
                 }
             }
 
@@ -819,6 +944,13 @@ fun NadaApp(synth: SynthEngine) {
                     Text(noteLabel(seqNote), fontWeight = FontWeight.Bold)
                     OutlinedButton(onClick = { seqNote = (seqNote + 1).coerceAtMost(96) }) { Text("+") }
                 }
+                val arrRack = vocalArrangement
+                if (arrRack != null) {
+                    ScrollRow {
+                        BarSelector(arrRack.bars, editBar, { showArrangementBar(it) }, playBar, isPlaying)
+                        Text("edit bar yang dipilih; bar lain tidak berubah", fontSize = 11.sp)
+                    }
+                }
                 ChannelRack(synth, grid, mutes, Modifier.fillMaxWidth().weight(1f))
             }
 
@@ -841,6 +973,13 @@ fun NadaApp(synth: SynthEngine) {
                         }
                     )
                     Text("Bunyi")
+                }
+                val arrRoll = vocalArrangement
+                if (arrRoll != null) {
+                    ScrollRow {
+                        BarSelector(arrRoll.bars, editBar, { showArrangementBar(it) }, playBar, isPlaying)
+                        Text("edit bar yang dipilih; bar lain tidak berubah", fontSize = 11.sp)
+                    }
                 }
                 ScrollRow {
                     Text("Panjang")
@@ -1018,8 +1157,29 @@ fun NadaApp(synth: SynthEngine) {
                         onBar = { importBar = it },
                         snap = snapImport,
                         onSnap = { snapImport = it },
-                        onImport = { importToRoll() }
+                        onImport = { importToRoll() },
+                        metroRec = metroRec,
+                        onMetroRec = { metroRec = it },
+                        countInBeat = countInBeat,
+                        onCancelCountIn = { cancelCountIn() }
                     )
+                    if (synth.vocal != null) {
+                        val tlBars = vocalArrangement?.bars
+                            ?: ceil((synth.vocal!!.size / CLIP_RATE.toDouble()) / (240.0 / bpm))
+                                .toInt().coerceIn(1, 32)
+                        PlaylistTimeline(
+                            clip = synth.vocal,
+                            version = clipVersion,
+                            bars = tlBars,
+                            bpm = bpm,
+                            startStep = clipStartStep,
+                            onStartStep = { clipStartStep = it },
+                            playingBar = playBar,
+                            playingStep = playStep,
+                            playing = isPlaying,
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                        )
+                    }
                     ScrollRow {
                         Text("Genre")
                         ChoiceDropdown("", GENRES.map { it.name }, genreIdx) { genreIdx = it }
@@ -1036,7 +1196,8 @@ fun NadaApp(synth: SynthEngine) {
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "Piano Roll / Channel Rack menampilkan bar 1 dari ${arr.bars}. " +
+                            "Piano Roll / Channel Rack menampilkan bar ${editBar + 1} dari ${arr.bars} " +
+                                "— pilih bar di tab Channel Rack / Piano Roll untuk mengedit bar lain. " +
                                 "Tekan Play untuk mendengar lagu penuh bersama vokal.",
                             fontSize = 11.sp,
                             color = Color(0xFF8A90A8)

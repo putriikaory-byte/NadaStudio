@@ -267,9 +267,12 @@ fun bassForBar(
  * Bangun aransemen multi-bar dari hasil analisis vokal. Lokal dan offline.
  * bars = ceil(durasi vokal / durasi 1 bar), dibatasi 32 bar.
  * Vokal tetap melodi utama; counter-melody hanya di bar tanpa vokal.
+ * [forcedBpm]: bila diisi, BPM ini dipakai apa adanya (mis. tempo proyek
+ * setelah vokal di-stretch ke tempo itu); bila null, tempo diperkirakan
+ * dari onset nada vokal seperti sebelumnya.
  */
-fun buildArrangement(analysis: VocalAnalysis, genre: Genre): VocalArrangement {
-    val bpm = estimateTempo(analysis.notes, genre.bpm)
+fun buildArrangement(analysis: VocalAnalysis, genre: Genre, forcedBpm: Int? = null): VocalArrangement {
+    val bpm = forcedBpm?.coerceIn(60, 160) ?: estimateTempo(analysis.notes, genre.bpm)
     val secPerBar = barSeconds(bpm)
     val lastEnd = analysis.notes.maxOfOrNull { it.startSec + it.durSec } ?: 0.0
     val totalSec = max(analysis.seconds, lastEnd)

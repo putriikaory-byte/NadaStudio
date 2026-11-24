@@ -89,10 +89,28 @@ fun ColumnScope.VocalPanel(
     onBar: (Int) -> Unit,
     snap: Boolean,
     onSnap: (Boolean) -> Unit,
-    onImport: () -> Unit
+    onImport: () -> Unit,
+    /** Metronom count-in 1 bar sebelum rekam (supaya vokal mulai di ketukan 1). */
+    metroRec: Boolean,
+    onMetroRec: (Boolean) -> Unit,
+    /** Angka hitungan count-in yang sedang tampil (4..1), 0 = tidak count-in. */
+    countInBeat: Int,
+    onCancelCountIn: () -> Unit
 ) {
     VRow {
-        if (!recording) {
+        if (countInBeat > 0) {
+            Button(
+                onClick = onCancelCountIn,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE05555))
+            ) { Text("✕ Batal") }
+            Text(
+                "Bersiap… $countInBeat",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFFF8A3D)
+            )
+            Text("rekam mulai setelah hitungan 1", fontSize = 11.sp)
+        } else if (!recording) {
             Button(onClick = onRecord) { Text("⏺ Rekam") }
         } else {
             Button(
@@ -100,6 +118,8 @@ fun ColumnScope.VocalPanel(
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE05555))
             ) { Text("⏹ Stop rekam · $recSeconds dtk") }
         }
+        Switch(checked = metroRec, onCheckedChange = onMetroRec)
+        Text("Metronom count-in (1 bar)")
         Switch(checked = monitor, onCheckedChange = onMonitor)
         Text("Rekam sambil lagu (pakai headset)")
         OutlinedButton(onClick = onUpload) { Text("📥 Upload suara") }
