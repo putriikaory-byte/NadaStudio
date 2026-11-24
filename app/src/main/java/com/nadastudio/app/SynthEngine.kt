@@ -49,16 +49,18 @@ enum class Wave(
 
 val CHANNEL_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth")
 val TRACK_NAMES = listOf("Melodi", "Bass", "Akor")
-val MIX_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth", "Melodi", "Bass", "Akor", "Live")
+val MIX_NAMES = listOf("Kick", "Snare", "Clap", "Hat", "Open Hat", "Synth", "Melodi", "Bass", "Akor", "Live", "Vokal")
 const val STEPS = 16
 const val SYNTH_CH = 5
 const val ROLL_ROWS = 60
 const val ROLL_LOW = 36
 const val TRACKS = 3
 const val ROLL_SIZE = ROLL_ROWS * STEPS
-const val MIX_CH = 10
+const val MIX_CH = 11
+const val LIVE_STRIP = 9
+const val VOCAL_STRIP = 10
 
-/** Synth polifonik + drum + step sequencer + piano roll multi-track + mixer stereo. */
+/** Synth polifonik + drum + step sequencer + piano roll + mixer stereo + jalur vokal. */
 class SynthEngine {
     private val sampleRate = 44100
     private val atkRate = DoubleArray(Wave.values().size) { 1.0 / (Wave.values()[it].atk * sampleRate) }
@@ -167,8 +169,15 @@ class SynthEngine {
     @Volatile var currentStep = 0
     @Volatile var exporting = false
     @Volatile var liveMute = false
+    @Volatile var vocalMute = false
     @Volatile var reverbMix = 0.15f
     @Volatile var delayMix = 0f
+    @Volatile var vocal: ShortArray? = null
+    @Volatile var vocalActive = false
+    @Volatile var vocalSuppress = false
+    @Volatile var vocalLoop = false
+    @Volatile var vocalShiftMs = 0
+    @Volatile private var clipResetReq = false
     @Volatile private var resetReq = false
     @Volatile private var running = false
     @Volatile private var pos = 0L
@@ -176,6 +185,7 @@ class SynthEngine {
     @Volatile private var gateOwner = -1
     @Volatile private var offAt = 0L
     @Volatile private var rollActive = false
+    private var clipPos = 0L
     private var seqCounter = 0L
     private var seqStep = 0
     private var clickPos = Int.MAX_VALUE
@@ -224,6 +234,7 @@ class SynthEngine {
         if (exporting) return
         running = false
         playing = false
+        vocalActive = false
         thread?.join(500)
         track?.stop()
         track?.release()
@@ -234,13 +245,30 @@ class SynthEngine {
         rollActive = false
     }
 
-    fun startSeq() { resetReq = true; playing = true }
-    fun stopSeq() { playing = false }
+    fun startSeq() {
+        resetReq = true
+        clipResetReq = true
+        vocalActive = true
+        playing = true
+    }
+
+    fun stopSeq() {
+        playing = false
+        vocalActive = false
+    }
+
+    /** Putar suara vokal saja, tanpa aransemen. */
+    fun playClip() {
+        clipResetReq = true
+        vocalActive = true
+    }
+
+    fun stopClip() { vocalActive = false }
 
     private fun stripOf(owner: Int): Int = when {
         owner in 0 until TRACKS -> CHANNEL_NAMES.size + owner
         owner == SYNTH_CH -> SYNTH_CH
-        else -> MIX_CH - 1
+        else -> LIVE_STRIP
     }
 
     fun noteOn(note: Int, w: Wave = wave, gain: Float = 1f, owner: Int = -1) {
@@ -290,10 +318,13 @@ class SynthEngine {
             val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
             val stepLen = perBeat / 4
             val musicFrames = (stepLen * STEPS * loops).toInt()
-            val total = musicFrames + sampleRate * 2
+            val clipFrames = (vocal?.size ?: 0) + maxOf(0, vocalShiftMs * sampleRate / 1000)
+            val total = maxOf(musicFrames, clipFrames) + sampleRate * 2
             val out = ShortArray(total * 2)
             val buf = ShortArray(256 * 2)
             resetReq = true
+            clipResetReq = true
+            vocalActive = vocal != null
             playing = true
             var done = 0
             while (done < total) {
@@ -304,6 +335,7 @@ class SynthEngine {
                 done += n
             }
             playing = false
+            vocalActive = false
             voices.clear()
             hits.clear()
             return out
@@ -333,7 +365,8 @@ class SynthEngine {
             val muted = when {
                 i < CHANNEL_NAMES.size -> chMute[i]
                 i < CHANNEL_NAMES.size + TRACKS -> trackMute[i - CHANNEL_NAMES.size]
-                else -> liveMute
+                i == LIVE_STRIP -> liveMute
+                else -> vocalMute
             }
             val on = !muted && (!anySolo || mixSolo[i])
             val g = if (on) mixVol[i] * 1.25 else 0.0
@@ -362,6 +395,10 @@ class SynthEngine {
         updateGains()
         for (i in 0 until frames) {
             if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0 }
+            if (clipResetReq) {
+                clipResetReq = false
+                clipPos = -(vocalShiftMs.toLong() * sampleRate / 1000L)
+            }
             if (!playing && rollActive) {
                 for (k in 0 until TRACKS * ROLL_ROWS) {
                     if (rollLeft[k] > 0) { noteOff(rollNote[k], k / ROLL_ROWS); rollLeft[k] = 0 }
@@ -410,7 +447,11 @@ class SynthEngine {
                     }
                 }
                 seqCounter++
-                if (seqCounter >= stepLen) { seqCounter = 0; seqStep = (seqStep + 1) % STEPS }
+                if (seqCounter >= stepLen) {
+                    seqCounter = 0
+                    seqStep = (seqStep + 1) % STEPS
+                    if (seqStep == 0 && vocalLoop && vocalActive) clipResetReq = true
+                }
             }
             if (gateNote >= 0 && pos >= offAt) { noteOff(gateNote, gateOwner); gateNote = -1 }
 
@@ -542,6 +583,19 @@ class SynthEngine {
                 if (ax > blockPeak[si]) blockPeak[si] = ax
                 h.t++
                 if (h.t > sampleRate * 0.7) hits.remove(h)
+            }
+
+            val vc = vocal
+            if (vocalActive && vc != null && !vocalSuppress) {
+                if (clipPos >= 0 && clipPos < vc.size) {
+                    val x = vc[clipPos.toInt()] / 32768.0
+                    l += x * gainL[VOCAL_STRIP]
+                    r += x * gainR[VOCAL_STRIP]
+                    val ax = abs(x) * maxOf(gainL[VOCAL_STRIP], gainR[VOCAL_STRIP])
+                    if (ax > blockPeak[VOCAL_STRIP]) blockPeak[VOCAL_STRIP] = ax
+                }
+                clipPos++
+                if (clipPos >= vc.size && !(vocalLoop && playing)) vocalActive = false
             }
 
             if (revAmt > 0.001) {
