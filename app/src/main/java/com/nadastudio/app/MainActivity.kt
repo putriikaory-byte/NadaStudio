@@ -238,6 +238,8 @@ fun NadaApp(synth: SynthEngine) {
             var vShift by remember { mutableIntStateOf(0) }
             var vLoop by remember { mutableStateOf(false) }
             var analysis by remember { mutableStateOf<VocalAnalysis?>(null) }
+            var vocalArrangement by remember { mutableStateOf<VocalArrangement?>(null) }
+            var arrangementSummary by remember { mutableStateOf<String?>(null) }
             var importBar by remember { mutableIntStateOf(0) }
             var snapImport by remember { mutableStateOf(true) }
             val rollOcts = remember { mutableStateListOf(2, 0, 1) }
@@ -291,12 +293,28 @@ fun NadaApp(synth: SynthEngine) {
                 }
             }
 
+            /**
+             * Salin pola 1 bar yang sedang ditampilkan (bar 1 aransemen) dari
+             * [SynthEngine.steps]/[SynthEngine.rollLen] ke aransemen multi-bar.
+             * Dipanggil di SideEffect dan sebelum proyek disimpan.
+             */
+            fun syncArrangementBar0() {
+                val arr = vocalArrangement ?: return
+                val d0 = arr.drums.getOrNull(0) ?: return
+                val r0 = arr.rolls.getOrNull(0) ?: return
+                for (i in d0.indices) d0[i] = synth.steps[i]
+                for (i in r0.indices) r0[i] = synth.rollLen[i]
+            }
+
             SideEffect {
                 synth.bpm = bpm; synth.metronomeOn = metro
                 synth.wave = wave; synth.volume = volume
                 synth.seqNote = seqNote
                 synth.reverbMix = reverb; synth.delayMix = delayFx
                 synth.vocalShiftMs = vShift; synth.vocalLoop = vLoop
+                // Piano Roll / Channel Rack menampilkan bar 1: edit di sana harus
+                // terdengar, jadi salin kembali isi bar 1 ke aransemen multi-bar.
+                syncArrangementBar0()
             }
 
             fun toast(msg: String) {
@@ -350,6 +368,10 @@ fun NadaApp(synth: SynthEngine) {
             }
 
             fun autoArrange(setTempo: Boolean) {
+                // Aransemen 1 bar lama menggantikan aransemen multi-bar dari vokal.
+                vocalArrangement = null
+                synth.arrangement = null
+                arrangementSummary = null
                 val g = GENRES[genreIdx]
                 var st = scaleType
                 if (followGenreScale && scaleType != g.scale) {
@@ -376,17 +398,21 @@ fun NadaApp(synth: SynthEngine) {
                 toast("Lagu dibuat: ${g.name}, ${NOTE_NAMES[root]} ${st.label}, ${if (setTempo) g.bpm else bpm} BPM")
             }
 
-            fun currentProject(): ProjectData = ProjectData(
-                bpm, wave, root, scaleType, lock, seqNote,
-                BooleanArray(grid.size) { grid[it] },
-                BooleanArray(mutes.size) { mutes[it] },
-                IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
-                List(TRACKS) { trackWaves[it] },
-                BooleanArray(TRACKS) { trackMutes[it] },
-                FloatArray(MIX_CH) { mixVols[it] },
-                FloatArray(MIX_CH) { mixPans[it] },
-                reverb, delayFx, volume, vShift, vLoop
-            )
+            fun currentProject(): ProjectData {
+                syncArrangementBar0()
+                return ProjectData(
+                    bpm, wave, root, scaleType, lock, seqNote,
+                    BooleanArray(grid.size) { grid[it] },
+                    BooleanArray(mutes.size) { mutes[it] },
+                    IntArray(TRACKS * ROLL_SIZE) { rolls[it / ROLL_SIZE][it % ROLL_SIZE] },
+                    List(TRACKS) { trackWaves[it] },
+                    BooleanArray(TRACKS) { trackMutes[it] },
+                    FloatArray(MIX_CH) { mixVols[it] },
+                    FloatArray(MIX_CH) { mixPans[it] },
+                    reverb, delayFx, volume, vShift, vLoop,
+                    arrangement = vocalArrangement
+                )
+            }
 
             fun applyProject(d: ProjectData) {
                 autoFollow = false
@@ -420,6 +446,16 @@ fun NadaApp(synth: SynthEngine) {
                 volume = d.master
                 vShift = d.vShift
                 vLoop = d.vLoop
+                if (d.arrangement != null) {
+                    vocalArrangement = d.arrangement
+                    synth.arrangement = d.arrangement
+                    arrangementSummary = d.arrangement.summaryText()
+                    pendingLoops = d.arrangement.bars
+                } else {
+                    vocalArrangement = null
+                    synth.arrangement = null
+                    arrangementSummary = null
+                }
             }
 
             fun saveProject() {
@@ -506,6 +542,10 @@ fun NadaApp(synth: SynthEngine) {
                 clipVersion++
                 analysis = null
                 importBar = 0
+                // Klip baru (atau dihapus) membuat aransemen dari vokal lama tidak berlaku.
+                vocalArrangement = null
+                synth.arrangement = null
+                arrangementSummary = null
                 scope.launch(Dispatchers.IO) { VocalStore.save(ctx, c) }
             }
 
@@ -620,6 +660,82 @@ fun NadaApp(synth: SynthEngine) {
                 rollOcts[0] = (sorted[sorted.size / 2] / 12).coerceIn(0, 4)
                 track = 0
                 toast("${notes.size} nada dimasukkan ke track Melodi")
+            }
+
+            /** Terapkan aransemen multi-bar dari vokal ke UI dan ke SynthEngine. */
+            fun applyVocalArrangement(arr: VocalArrangement) {
+                val g = GENRES[genreIdx]
+                autoFollow = false
+                skipEffect = true
+                root = arr.root
+                scaleType = arr.scale
+                followGenreScale = false
+                bpm = arr.bpm
+                if (genreInstr) {
+                    val w = listOf(g.melodyWave, g.bassWave, g.chordWave)
+                    for (t in 0 until TRACKS) {
+                        trackWaves[t] = w[t]
+                        synth.trackWave[t] = w[t]
+                    }
+                }
+                rollOcts[0] = 2
+                rollOcts[1] = 0
+                rollOcts[2] = 1
+                // Tampilkan bar pertama di Channel Rack / Piano Roll.
+                val d0 = arr.drums[0]
+                for (i in grid.indices) { grid[i] = d0[i]; synth.steps[i] = d0[i] }
+                val r0 = arr.rolls[0]
+                for (t in 0 until TRACKS) {
+                    for (i in 0 until ROLL_SIZE) {
+                        val v = r0[t * ROLL_SIZE + i]
+                        rolls[t][i] = v
+                        synth.rollLen[t * ROLL_SIZE + i] = v
+                    }
+                }
+                seqNote = 60 + arr.root
+                // Vokal berbunyi sekali sepanjang lagu, bukan diulang tiap bar.
+                vLoop = false
+                pendingLoops = arr.bars
+                vocalArrangement = arr
+                synth.arrangement = arr
+                arrangementSummary = arr.summaryText()
+            }
+
+            /**
+             * "Aransemen dari Vokal": rekaman -> analisis nada/kunci -> perkiraan tempo ->
+             * aransemen multi-bar mengikuti nada vokal (lihat buildArrangement).
+             * Genre yang dipilih pengguna tetap dipakai; vokal tetap melodi utama.
+             */
+            fun arrangeFromVocal() {
+                val c = synth.vocal ?: return
+                val genre = GENRES[genreIdx]
+                scope.launch {
+                    busyMsg = "Menganalisis vokal dan membuat aransemen…"
+                    val result: Pair<VocalAnalysis, VocalArrangement?>? = withContext(Dispatchers.Default) {
+                        try {
+                            val a = PitchDetect.analyze(c)
+                            if (a == null) null
+                            else if (a.notes.isEmpty()) Pair(a, null)
+                            else Pair(a, buildArrangement(a, genre))
+                        } catch (e: Throwable) {
+                            null
+                        }
+                    }
+                    busyMsg = null
+                    if (result == null) {
+                        toast("Gagal menganalisis vokal")
+                        return@launch
+                    }
+                    val (a, arr) = result
+                    analysis = a
+                    importBar = 0
+                    if (arr == null) {
+                        toast("Tidak ada nada terdeteksi. Coba rekaman yang lebih jelas dan tanpa musik latar.")
+                        return@launch
+                    }
+                    applyVocalArrangement(arr)
+                    toast("Aransemen dibuat: ${arr.genreName}, ${NOTE_NAMES[arr.root]} ${arr.scale.label}, ${arr.bpm} BPM, ${arr.bars} bar")
+                }
             }
 
             LaunchedEffect(Unit) {
@@ -904,6 +1020,46 @@ fun NadaApp(synth: SynthEngine) {
                         onSnap = { snapImport = it },
                         onImport = { importToRoll() }
                     )
+                    ScrollRow {
+                        Text("Genre")
+                        ChoiceDropdown("", GENRES.map { it.name }, genreIdx) { genreIdx = it }
+                        Button(
+                            onClick = { arrangeFromVocal() },
+                            enabled = synth.vocal != null
+                        ) { Text("🎼 Aransemen dari Vokal") }
+                    }
+                    val arr = vocalArrangement
+                    if (arr != null) {
+                        Text(
+                            arrangementSummary ?: "",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "Piano Roll / Channel Rack menampilkan bar 1 dari ${arr.bars}. " +
+                                "Tekan Play untuk mendengar lagu penuh bersama vokal.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF8A90A8)
+                        )
+                        ScrollRow {
+                            OutlinedButton(onClick = {
+                                pendingLoops = arr.bars
+                                exportWavL.launch("aransemen-vokal.wav")
+                            }) { Text("🎧 Ekspor WAV lagu penuh (${arr.bars} bar)") }
+                            OutlinedButton(onClick = {
+                                vocalArrangement = null
+                                synth.arrangement = null
+                                arrangementSummary = null
+                            }) { Text("Batalkan aransemen") }
+                        }
+                    } else {
+                        Text(
+                            "Belum ada aransemen dari vokal. Rekam atau upload suara, " +
+                                "pilih genre, lalu tekan tombol di atas.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF8A90A8)
+                        )
+                    }
                 }
             }
 
