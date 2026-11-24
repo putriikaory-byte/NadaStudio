@@ -24,7 +24,9 @@ class ProjectData(
     val vShift: Int,
     val vLoop: Boolean,
     /** Aransemen multi-bar dari vokal; null = proyek 1 bar lama (format v=3). */
-    val arrangement: VocalArrangement? = null
+    val arrangement: VocalArrangement? = null,
+    /** Posisi awal klip vokal di Playlist (dalam step); 0 = mulai di ketukan 1. */
+    val clipStartStep: Int = 0
 )
 
 object ProjectStore {
@@ -54,6 +56,7 @@ object ProjectStore {
         sb.append("master=").append(d.master).append('\n')
         sb.append("vshift=").append(d.vShift).append('\n')
         sb.append("vloop=").append(if (d.vLoop) 1 else 0).append('\n')
+        sb.append("clipstart=").append(d.clipStartStep.coerceIn(0, 32 * STEPS)).append('\n')
         if (arr != null) {
             sb.append("bars=").append(arr.bars).append('\n')
             sb.append("arrGenre=").append(arr.genreName).append('\n')
@@ -177,6 +180,8 @@ object ProjectStore {
                 master = (m["master"]?.toFloatOrNull() ?: 0.8f).coerceIn(0f, 1f),
                 vShift = (m["vshift"]?.toIntOrNull() ?: 0).coerceIn(-500, 500),
                 vLoop = m["vloop"] == "1",
+                // File lama tidak punya baris clipstart: default 0 (mulai di ketukan 1).
+                clipStartStep = (m["clipstart"]?.toIntOrNull() ?: 0).coerceIn(0, 32 * STEPS),
                 // File lama (v=3) tidak punya baris-baris arr*: arrangement = null.
                 arrangement = parseArrangement(m, parsedRoot, parsedScale)
             )

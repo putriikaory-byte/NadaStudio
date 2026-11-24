@@ -178,6 +178,22 @@ class SynthEngine {
     @Volatile var vocalLoop = false
     @Volatile var vocalShiftMs = 0
     /**
+     * Posisi awal klip vokal di timeline (dalam step, 16 step = 1 bar).
+     * Diatur dari Playlist; dipakai saat playback maupun export WAV, jadi
+     * klip berbunyi mulai dari step itu, bukan selalu dari ketukan 1.
+     */
+    @Volatile var vocalStartStep = 0
+    /**
+     * Count-in metronom sebelum rekam (1 bar = 4 ketuk). [startCountIn]
+     * membunyikan klik pertama seketika, lalu satu klik tiap ketuk;
+     * [countInBeatNow] berisi angka hitungan yang sedang tampil (4..1,
+     * lalu 0 = selesai). Klik count-in tidak tergantung [metronomeOn].
+     */
+    @Volatile var countInBeatNow = 0
+    @Volatile private var countInLeft = 0
+    @Volatile private var countInBeats = 0
+    @Volatile private var countInNextAt = -1L
+    /**
      * Aransemen multi-bar dari vokal (lihat AutoArrange.kt). Bila null, pemutar memakai
      * pola 1 bar lama di [steps]/[rollLen] seperti sebelumnya.
      */
@@ -243,6 +259,7 @@ class SynthEngine {
         running = false
         playing = false
         vocalActive = false
+        cancelCountIn()
         thread?.join(500)
         track?.stop()
         track?.release()
@@ -260,6 +277,21 @@ class SynthEngine {
         clipResetReq = true
         vocalActive = true
         playing = true
+    }
+
+    /** Mulai count-in [beats] ketuk; klik pertama berbunyi seketika. */
+    fun startCountIn(beats: Int = 4) {
+        countInBeats = beats.coerceIn(1, 8)
+        countInLeft = countInBeats
+        countInBeatNow = countInBeats
+        countInNextAt = -1L
+    }
+
+    /** Batalkan count-in yang sedang berjalan. */
+    fun cancelCountIn() {
+        countInLeft = 0
+        countInBeatNow = 0
+        countInNextAt = -1L
     }
 
     fun stopSeq() {
@@ -330,7 +362,14 @@ class SynthEngine {
             val perBeat = (sampleRate * 60.0 / bpm).toLong().coerceAtLeast(4)
             val stepLen = perBeat / 4
             val musicFrames = (stepLen * STEPS * loops).toInt()
-            val clipFrames = (vocal?.size ?: 0) + maxOf(0, vocalShiftMs * sampleRate / 1000)
+            // Klip vokal bisa mulai belakangan di timeline (vocalStartStep),
+            // jadi panjang total harus menampung jeda itu juga.
+            val clipFrames = if (vocal != null) {
+                (vocal?.size ?: 0) + maxOf(0, vocalShiftMs * sampleRate / 1000) +
+                    (vocalStartStep.toLong() * stepLen).toInt()
+            } else {
+                0
+            }
             val total = maxOf(musicFrames, clipFrames) + sampleRate * 2
             val out = ShortArray(total * 2)
             val buf = ShortArray(256 * 2)
@@ -409,7 +448,10 @@ class SynthEngine {
             if (resetReq) { resetReq = false; seqCounter = 0; seqStep = 0; seqBar = 0; currentBar = 0 }
             if (clipResetReq) {
                 clipResetReq = false
-                clipPos = -(vocalShiftMs.toLong() * sampleRate / 1000L)
+                // Vokal mulai di posisi timeline-nya (vocalStartStep), ditambah
+                // geser manual (vocalShiftMs). clipPos negatif = jeda sebelum bunyi.
+                clipPos = -(vocalShiftMs.toLong() * sampleRate / 1000L) -
+                    vocalStartStep.toLong() * stepLen
             }
             // Bar saat ini: pola multi-bar bila ada arrangement, kalau tidak selalu bar 0.
             val barCount = (arrangement?.bars ?: 1).coerceAtLeast(1)
@@ -638,6 +680,16 @@ class SynthEngine {
                 delayW = (delayW + 1) % delayBufL.size
             }
 
+            // Klik metronom (saat playback) dan klik count-in (sebelum rekam).
+            // Count-in punya jadwal sendiri supaya klik pertama berbunyi
+            // seketika dan angkanya pas dengan yang tampil di layar.
+            if (countInLeft > 0 && (countInNextAt < 0L || pos >= countInNextAt)) {
+                clickPos = 0
+                clickFreq = if (countInLeft == countInBeats) 1500.0 else 1000.0
+                countInLeft--
+                countInBeatNow = countInLeft
+                countInNextAt = pos + perBeat
+            }
             if (metronomeOn) {
                 val beat = if (playing) stepTrig && currentStep % 4 == 0 else pos % perBeat == 0L
                 if (beat) {
@@ -648,13 +700,13 @@ class SynthEngine {
                         if ((pos / perBeat) % 4 == 0L) 1500.0 else 1000.0
                     }
                 }
-                if (clickPos < clickLen) {
-                    val env = 1.0 - clickPos.toDouble() / clickLen
-                    val c = sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
-                    l += c
-                    r += c
-                    clickPos++
-                }
+            }
+            if (clickPos < clickLen) {
+                val env = 1.0 - clickPos.toDouble() / clickLen
+                val c = sin(2 * PI * clickFreq * clickPos / sampleRate) * env * 0.4
+                l += c
+                r += c
+                clickPos++
             }
             pos++
             buf[i * 2] = (tanh(l * vol) * 32767 * 0.9).toInt().toShort()
