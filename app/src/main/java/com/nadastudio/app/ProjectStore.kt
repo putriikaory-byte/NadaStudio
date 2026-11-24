@@ -14,7 +14,14 @@ class ProjectData(
     val mutes: BooleanArray,
     val roll: IntArray,
     val trackWaves: List<Wave>,
-    val trackMutes: BooleanArray
+    val trackMutes: BooleanArray,
+    val mixVol: FloatArray,
+    val mixPan: FloatArray,
+    val reverb: Float,
+    val delay: Float,
+    val master: Float,
+    val vShift: Int,
+    val vLoop: Boolean
 )
 
 object ProjectStore {
@@ -24,7 +31,7 @@ object ProjectStore {
 
     fun toText(d: ProjectData): String {
         val sb = StringBuilder()
-        sb.append("v=2\n")
+        sb.append("v=3\n")
         sb.append("bpm=").append(d.bpm).append('\n')
         sb.append("wave=").append(d.wave.name).append('\n')
         sb.append("root=").append(d.root).append('\n')
@@ -36,6 +43,13 @@ object ProjectStore {
         sb.append("roll=").append(d.roll.joinToString(",")).append('\n')
         sb.append("twaves=").append(d.trackWaves.joinToString(",") { it.name }).append('\n')
         sb.append("tmutes=").append(d.trackMutes.joinToString("") { if (it) "1" else "0" }).append('\n')
+        sb.append("mixvol=").append(d.mixVol.joinToString(",")).append('\n')
+        sb.append("mixpan=").append(d.mixPan.joinToString(",")).append('\n')
+        sb.append("reverb=").append(d.reverb).append('\n')
+        sb.append("delay=").append(d.delay).append('\n')
+        sb.append("master=").append(d.master).append('\n')
+        sb.append("vshift=").append(d.vShift).append('\n')
+        sb.append("vloop=").append(if (d.vLoop) 1 else 0).append('\n')
         return sb.toString()
     }
 
@@ -66,7 +80,18 @@ object ProjectStore {
                     val name = m["twaves"]?.split(",")?.getOrNull(i)
                     Wave.values().firstOrNull { it.name == name } ?: defaults[i]
                 },
-                trackMutes = BooleanArray(TRACKS) { m["tmutes"]?.getOrNull(it) == '1' }
+                trackMutes = BooleanArray(TRACKS) { m["tmutes"]?.getOrNull(it) == '1' },
+                mixVol = FloatArray(MIX_CH) { i ->
+                    m["mixvol"]?.split(",")?.getOrNull(i)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.8f
+                },
+                mixPan = FloatArray(MIX_CH) { i ->
+                    m["mixpan"]?.split(",")?.getOrNull(i)?.toFloatOrNull()?.coerceIn(-1f, 1f) ?: 0f
+                },
+                reverb = (m["reverb"]?.toFloatOrNull() ?: 0.15f).coerceIn(0f, 1f),
+                delay = (m["delay"]?.toFloatOrNull() ?: 0f).coerceIn(0f, 1f),
+                master = (m["master"]?.toFloatOrNull() ?: 0.8f).coerceIn(0f, 1f),
+                vShift = (m["vshift"]?.toIntOrNull() ?: 0).coerceIn(-500, 500),
+                vLoop = m["vloop"] == "1"
             )
         }
     } catch (e: Exception) {
