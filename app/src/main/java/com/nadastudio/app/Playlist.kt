@@ -2,7 +2,7 @@ package com.nadastudio.app
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGesture
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -129,7 +129,7 @@ fun PlaylistTimeline(
                                 .background(Color(0xFF1F6F6A), RoundedCornerShape(4.dp))
                                 .pointerInput(Unit) {
                                     var acc = 0f
-                                    detectHorizontalDragGesture(
+                                    detectHorizontalDragGestures(
                                         onDragStart = { dragging = true },
                                         onDragEnd = { dragging = false },
                                         onDragCancel = { dragging = false },
